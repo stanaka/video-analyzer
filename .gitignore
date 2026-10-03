@@ -1,0 +1,17 @@
+.venv*/
+.runtime/
+.models/
+.cache/
+.uv-cache/
+.python/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.analysis.md
+*.analysis.json
+.video-analyzer/
+.validation/

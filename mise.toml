@@ -1,0 +1,68 @@
+min_version = "2026.9.16"
+
+[tools]
+python = "3.11.15"
+uv = "0.12.11"
+
+[settings]
+python.compile = false
+python.uv_venv_auto = "source"
+
+[env]
+UV_CACHE_DIR = "{{ config_root }}/.uv-cache"
+# mise owns Python installation; uv owns the three virtual environments.
+UV_PYTHON = { value = "{{ tools.python.path }}/bin/python", tools = true }
+UV_PYTHON_DOWNLOADS = "never"
+
+[tasks.setup]
+description = "Install locked CLI and model worker environments for this platform"
+run = "bash scripts/setup.sh"
+
+[tasks."setup:mac"]
+description = "Install locked CLI, PyTorch, and MLX environments on Apple Silicon"
+run = "bash scripts/setup-mac.sh"
+
+[tasks."setup:cuda"]
+description = "Install locked CLI and PyTorch environments on x86_64 Linux"
+run = "bash scripts/setup-cuda.sh"
+
+[tasks."setup:dev"]
+description = "Install CLI and test dependencies only, without model workers"
+run = "uv sync --frozen"
+
+# Runtime tasks deliberately have no setup dependency: they never install packages
+# or download models implicitly. Arguments are forwarded to the underlying CLI.
+[tasks.prepare-models]
+description = "Explicitly download models using the saved hf login; pass --profile mac or cuda"
+run = ".venv/bin/video-analyzer prepare-models"
+
+[tasks.doctor]
+description = "Check local models, workers, FFmpeg, and accelerators offline"
+run = ".venv/bin/video-analyzer doctor"
+
+[tasks.analyze]
+description = "Analyze a local MP4 offline; pass the input path and CLI options"
+run = ".venv/bin/video-analyzer analyze"
+
+[tasks.test]
+description = "Run tests without loading real models"
+run = ".venv/bin/python -m pytest -m 'not models'"
+
+[tasks."test:models"]
+description = "Run opt-in real-model tests with VIDEO_ANALYZER_MODEL_TEST_VIDEO"
+run = ".venv/bin/python -m pytest -m models -s"
+
+[tasks.lint]
+description = "Check Python lint and formatting"
+run = [
+  ".venv/bin/python -m ruff check src tests",
+  ".venv/bin/python -m ruff format --check src tests",
+]
+
+[tasks.check]
+description = "Run lint, formatting, and tests"
+depends = ["lint", "test"]
+
+[tasks.build]
+description = "Build the wheel and source distribution"
+run = "uv build"

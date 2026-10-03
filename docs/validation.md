@@ -1,0 +1,156 @@
+# Validation record
+
+Executed on 2026-10-03 on an Apple M2 Mac with 24 GB unified memory, macOS
+27.0.1, and Python 3.11.15. These are smoke tests and measured examples, not
+accuracy benchmarks or throughput guarantees.
+
+## Environment and model preparation
+
+Setup was subsequently migrated to mise 2026.9.16 with Python 3.11.15 and uv
+0.12.11. `mise run setup` completed on this Mac, and all three environments now
+use the mise-managed Python interpreter. `mise run check` passed all 30 normal
+tests plus lint and formatting. `mise run doctor --asr both --verify-hashes`
+reported no errors and confirmed MPS/Metal acceleration. Tool download URLs and
+checksums were locked for macOS arm64 and Linux x86_64; Linux installation was
+not executed. These setup checks did not rerun the earlier real-model smoke tests.
+
+Both worker environments were installed from their platform hash locks. The audio
+worker used PyTorch 2.8.0, Transformers 4.57.6, pyannote.audio 4.0.4, and qwen-asr
+0.0.6. The vision worker used MLX 0.32.3, MLX-VLM 0.7.4, and Transformers 5.14.0.
+The installed MLX-VLM code includes multi-image handling and image-feature clipping
+to prevent numerical overflow in Molmo2.
+
+`prepare-models --profile mac --asr both` was executed successfully using the
+user's existing `hf` login. It was rerun against the prepared snapshots to verify
+the command's repeatability. No authentication token was included in a command,
+report, checkpoint, or manifest. Prepared model assets occupy approximately 15 GiB.
+The final `doctor --asr both --verify-hashes` check passed with OS networking
+disabled, reporting MPS and Metal available and no missing or corrupt assets.
+
+| Model | Immutable revision |
+| --- | --- |
+| MLX Molmo2-8B-4bit | `4fcbe926577641af12aa5086cf5c292db9dd9730` |
+| pyannote community-1 | `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee` |
+| Whisper large-v3 | `06f233fe06e710322aca913c1bc4249a0d71fce1` |
+| Qwen3-ASR-1.7B | `7278e1e70fe206f11671096ffdd38061171dd6e5` |
+| Qwen3-ForcedAligner-0.6B | `c7cbfc2048c462b0d63a45797104fc9db3ad62b7` |
+
+## Automated checks
+
+**30 automated tests passed** in the normal suite. Separately, **three real-model
+Mac tests passed**: the Whisper pipeline, the Qwen pipeline, and the maximum-frame
+Molmo2 test. The two pipeline tests also exercised checkpoint-only resume.
+
+The normal test suite covers generated MP4s with known cuts, no cuts, no audio,
+silent audio, delayed audio, and variable frame rates. It also covers overlapping
+speaker turns, unmatched words, zero-duration aligned tokens, Japanese spacing
+and punctuation, scene-boundary ownership, and bounded chunking of a one-hour
+timeline. The one-hour test exercises chunk scheduling, not real-model inference.
+
+Recovery tests interrupt ASR chunks and visual windows, then verify that only
+incomplete work is repeated. Additional checks cover fresh-run cache isolation,
+input/model/configuration invalidation, atomic reports, corrupt or missing assets,
+worker errors/timeouts, Python socket blocking, and automatic versus explicit MPS
+fallback behavior. JSON round-trips preserve the canonical result.
+
+Ruff lint and formatting checks passed. Both a wheel and a source distribution
+were built offline. Installation scripts passed shell syntax checks. The included
+GitHub Actions workflow has not been executed on remote runners in this session.
+
+## Real offline pipeline tests
+
+The fixture is a 16.3-second, 320×240 MP4 with a white background and a red square.
+It includes Japanese speech synthesized with the macOS Kyoko voice, followed by
+English speech synthesized with Daniel, separated by silence. Its SHA-256 is
+`dd1dbdd45e6c0461120f2b8b74851d7e9a46fd8f5fc018f052f1b5cd1542d5f6`.
+
+Each run used a new, empty `HF_HOME`. The OS sandbox denied all network activity,
+in addition to the application's offline settings and Python socket guard. The
+only files subsequently created under those Hugging Face homes were local custom
+code modules; no general Hub weight cache was populated. Models came exclusively
+from `.models`.
+
+Both backends completed scene detection, full-recording diarization, transcription,
+and Japanese Molmo2 descriptions. Both detected two speakers automatically and
+retained Japanese and English. The tests then resumed with a worker factory that
+raises an error if invoked: both resumes passed without loading a model.
+
+| Measured operation | Whisper | Qwen |
+| --- | ---: | ---: |
+| Complete API invocation, including worker startup/load | 73.50 s | 80.42 s |
+| Diarization inference, CPU | 5.78 s | 5.53 s |
+| ASR inference, MPS FP16, summed speech chunks | 12.73 s | 5.28 s |
+| Molmo2 inference, MLX, eight 320×240 frames | 36.53 s | 36.93 s |
+| Molmo2 peak MLX device allocation | 7.89 GiB | 7.89 GiB |
+
+No analysis checkpoints were reused during the initial runs. Filesystem and Metal
+kernel caches could be warm. These timings exclude model downloads and environment
+installation. Runtime loading, decoding, and orchestration explain the difference
+between stage inference times and the complete invocation.
+
+The initial Mac integration gate used two ordered frames showing a red square
+moving across a white background. Molmo2 loaded offline, described the movement
+in Japanese, and completed generation in 31.65 seconds with a 7.41 GiB MLX peak.
+Its deliberately short 128-token limit truncated the final sentence; production
+uses a 448-token budget and a shorter-description prompt.
+
+The maximum-frame follow-up used eight ordered 768×576 images with a red square
+moving from left to right, spanning a 30-second observation window. It passed
+with OS networking disabled: **140.15 seconds inference, 146.78 seconds for the
+test, and 9.51 GiB peak MLX device allocation** (10,208,660,664 bytes). It produced
+Japanese text describing the square's movement without running out of memory.
+The model incorrectly described the supplied four-second sample spacing as one
+second; generated prose is not a substitute for the canonical numeric timestamps.
+
+MLX device allocation is not total system memory. Process RSS omits some Metal
+allocations, and the figures overlap on unified memory: do not add RSS and MLX
+allocation. Other applications and input resolution affect available headroom.
+
+## Quality observations and limits
+
+Whisper correctly transcribed the Japanese sentence in this fixture. Qwen wrote
+`動学解析` where the intended phrase was `動画解析`. Both interpreted the synthesized
+English word “offline” as “a flying.” These outputs were retained without manual
+correction. This test demonstrates functioning language preservation, alignment,
+and speaker assignment; it does not establish recognition accuracy on natural
+recordings. Automatic language detection restarts across separated speech regions;
+switching languages inside uninterrupted speech can still be missed.
+
+Molmo2 produced meaningful Japanese descriptions of the red square and white
+background. Descriptions may include redundant wording or unsupported details.
+Sparse frame sampling can miss brief actions. Reports identify the models and
+quantization and state that generated results are estimates.
+
+The pinned macOS PyAV/OpenCV wheels emit duplicate FFmpeg AVFoundation class
+warnings when imported together. They did not prevent these file-decoding tests.
+Pyannote emitted a pooling warning on the synthetic voices; Transformers emitted
+a deprecation warning. The diagnostics remain on stderr.
+
+Linux CUDA dependency resolution and a hash lock are provided. **No NVIDIA GPU
+was available, so CUDA installation and real-model inference were not executed.**
+The original Molmo2 CUDA backend follows the upstream multi-image interface but
+still requires validation on the target GPU. No hour-long real-model run, dense
+overlapping-speech accuracy test, or broad codec corpus was executed. CPU retry
+behavior was fault-injected in tests; neither successful MPS smoke test required
+a CPU retry.
+
+## Reproduce real-model checks
+
+After preparation, supply an MP4 containing speech and visible content. On macOS,
+the following command adds OS-level network denial while allowing Metal access:
+
+```bash
+/usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+  /usr/bin/env VIDEO_ANALYZER_MODEL_TEST_VIDEO=/absolute/path/fixture.mp4 \
+  .venv/bin/pytest -m models -v -s
+```
+
+For a Japanese/English fixture, also set
+`VIDEO_ANALYZER_TEST_LANGUAGES=japanese,english`. The tests create independent empty
+Hugging Face homes and write JSON/Markdown results under pytest's temporary
+directory. On Linux, set `VIDEO_ANALYZER_TEST_PROFILE=cuda` and use a network-disabled
+container or network namespace suitable for the installed NVIDIA runtime.
+
+The ignored `.validation` directory in this working copy contains the generated
+fixture, raw reports, logs, and checkpoint measurements from this session. Test
+fixtures and model weights are not included in the package.
