@@ -113,13 +113,13 @@ after all stages succeed. Existing reports are preserved on failure.
 | `--min-scene-seconds` | `0.5` | Minimum spacing between cuts |
 | `--window-seconds` | `30` | Description window length, maximum 30 seconds |
 | `--frames-per-window` | `8` | Maximum eight chronological frames per window |
-| `--audio-device` | `auto` | CPU, MPS, or CUDA; automatic MPS retries unsupported operations on CPU |
+| `--audio-device` | `auto` | CPU, MPS, or CUDA; automatic MPS retries unsupported operations and out-of-memory errors on CPU |
 | `--diarization-device` | `auto` | CPU on Mac, CUDA on the CUDA profile |
 | `--vision-device` | `auto` | MLX/Metal on Mac; CPU/CUDA overrides for PyTorch vision |
 | `--model-dir` | `.models` | Prepared models |
 | `--runtime-dir` | `.runtime` | Parent of `torch` and `mlx` environments |
 | `--work-dir` | `.video-analyzer` beside input | Checkpoints and temporary audio |
-| `--worker-timeout` | `3600` | Seconds allowed per model load or inference request |
+| `--worker-timeout` | `3600` | Seconds allowed without worker progress; diarization batch progress resets the timer |
 
 Paths are relative to the current directory. Outside this repository, supply
 absolute model and runtime directory paths.
@@ -158,6 +158,29 @@ to five seconds of context on each side within a region. Language detection runs
 again for each region, and 0.3-second padding protects words near VAD boundaries;
 timestamp ownership and overlap reconciliation remove boundary duplicates.
 No-audio videos produce visual reports. Silence produces an empty transcript.
+
+Diarization reports its device, audio duration, and progress through segmentation,
+speaker embeddings, and clustering on stderr. The worker timeout measures time
+without progress, so a long recording can take more than one hour in total while
+batches continue completing. Model loading, ASR chunks, visual windows, and
+clustering must each finish within the timeout when they provide no intermediate
+progress. A timeout reports the last progress message; a worker exit reports its
+exit code or signal. After a timeout, retry with `--resume` and, if necessary,
+`--worker-timeout 7200`.
+
+On macOS, PyAV and OpenCV can emit duplicate `AVFFrameReceiver`/`AVFAudioReceiver`
+warnings during scene detection. These libraries run in the parent process,
+separately from the diarization worker. Pyannote can also emit a pooling `std()`
+warning for very short speaker regions; this warning alone does not mean the
+worker failed. Use the subsequent timeout or exit diagnostic to identify the
+failure rather than removing bundled libraries.
+
+With `--audio-device auto`, an unsupported MPS operation or MPS out-of-memory
+error releases the accelerator model and retries on CPU. If this happens during
+transcription, the failed chunk is retried and subsequent chunks stay on CPU;
+the report includes a warning. CPU transcription can be slower. To use CPU from
+the start, pass `--audio-device cpu`. An explicit `--audio-device mps` propagates
+errors without switching devices. The MPS memory limit remains enabled.
 
 Long scenes retain their detected boundaries and receive timestamped observations
 for consecutive windows. Each window uses up to eight actual frames resized to a

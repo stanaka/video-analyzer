@@ -56,7 +56,12 @@ def parser():
     analyze.add_argument("--vision-device", choices=("auto", "cpu", "cuda"), default="auto")
     analyze.add_argument("--frames-per-window", type=int, default=8)
     analyze.add_argument("--window-seconds", type=float, default=30)
-    analyze.add_argument("--worker-timeout", type=float, default=3600)
+    analyze.add_argument(
+        "--worker-timeout",
+        type=float,
+        default=3600,
+        help="Seconds allowed without worker progress (default: 3600)",
+    )
     return cli
 
 

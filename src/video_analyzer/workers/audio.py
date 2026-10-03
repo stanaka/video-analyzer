@@ -1,5 +1,7 @@
 import math
 import sys
+import time
+import traceback
 
 from ..errors import AnalysisError
 
@@ -55,6 +57,44 @@ def mps_unsupported(exc: Exception) -> bool:
     )
 
 
+def mps_out_of_memory(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "mps" in message and "out of memory" in message
+
+
+class DiarizationProgress:
+    """Report real pyannote progress without retaining large intermediate tensors."""
+
+    def __init__(self, report):
+        self.report = report
+        self.step = None
+        self.completed = None
+        self.reported_at = 0.0
+
+    def __call__(self, step_name, _artifact=None, *, completed=None, total=None, **_):
+        now = time.monotonic()
+        display = True
+        if completed is not None and total is not None:
+            # Pyannote may report a full batch beyond the final partial batch.
+            completed = min(completed, total)
+            if step_name == self.step and self.completed is not None:
+                if completed <= self.completed:
+                    return
+                if completed < total and now - self.reported_at < 10:
+                    display = False
+            message = f"Diarization {step_name}: {completed}/{total}"
+        else:
+            message = f"Diarization {step_name}: complete"
+            if step_name == "embeddings":
+                message += "; clustering speakers"
+        # Every advancing batch resets the watchdog, including when the user sets
+        # a timeout below the log interval. Only terminal output is throttled.
+        self.report(message, display=display)
+        self.step, self.completed = step_name, completed
+        if display:
+            self.reported_at = now
+
+
 class AudioBackend:
     def __init__(self, options):
         self.options = options
@@ -70,13 +110,18 @@ class AudioBackend:
             self._retry_cpu(exc)
 
     def _retry_cpu(self, exc):
-        if not (self.auto and self.device == "mps" and mps_unsupported(exc)):
+        out_of_memory = mps_out_of_memory(exc)
+        if not (self.auto and self.device == "mps" and (out_of_memory or mps_unsupported(exc))):
             raise exc
         import gc
 
         import torch
 
-        print("MPS operation unsupported; retrying ASR on CPU", file=sys.stderr)
+        reason = "MPS ran out of memory" if out_of_memory else "MPS operation unsupported"
+        print(f"{reason}; retrying ASR on CPU", file=sys.stderr, flush=True)
+        # Failed model/generation frames retain tensors even after deleting the
+        # backend's references. Release them before clearing MPS and loading CPU weights.
+        traceback.clear_frames(exc.__traceback__)
         for name in ("model", "aligner", "processor"):
             if hasattr(self, name):
                 delattr(self, name)
@@ -84,7 +129,11 @@ class AudioBackend:
         torch.mps.empty_cache()
         self.device = "cpu"
         self._load()
-        self.warnings.append("ASR used CPU after an unsupported MPS operation.")
+        self.warnings.append(
+            "ASR used CPU after MPS ran out of memory."
+            if out_of_memory
+            else "ASR used CPU after an unsupported MPS operation."
+        )
 
     def _load(self):
         import torch
@@ -148,13 +197,16 @@ class AudioBackend:
         else:
             raise AnalysisError(f"Unknown audio backend: {self.kind}")
 
-    def diarize(self, audio: str, num_speakers: int | None = None):
+    def diarize(self, audio: str, num_speakers: int | None = None, *, progress=None):
         import soundfile as sf
         import torch
 
         waveform, sample_rate = sf.read(audio, dtype="float32")
+        if progress:
+            progress(f"Diarization on {self.device}: {len(waveform) / sample_rate:.1f}s of audio")
         output = self.model(
             {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": sample_rate},
+            hook=DiarizationProgress(progress) if progress else None,
             **({"num_speakers": num_speakers} if num_speakers else {}),
         )
 

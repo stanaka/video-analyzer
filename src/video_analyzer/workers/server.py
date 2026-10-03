@@ -32,6 +32,22 @@ def main():
     backend = None
     # Third-party progress/import prints must never contaminate the JSONL channel.
     protocol = sys.stdout
+
+    def send(response):
+        protocol.write(json.dumps(response, ensure_ascii=False, allow_nan=False) + "\n")
+        protocol.flush()
+
+    def progress(message, *, display=True):
+        send(
+            {
+                "version": 1,
+                "id": request["id"],
+                "event": "progress",
+                "message": message,
+                "display": display,
+            }
+        )
+
     with contextlib.redirect_stdout(sys.stderr):
         for line in sys.stdin:
             started = time.monotonic()
@@ -62,7 +78,7 @@ def main():
                 elif backend is None:
                     raise ValueError("Load a model before requesting inference")
                 elif operation == "diarize":
-                    result = backend.diarize(**payload)
+                    result = backend.diarize(**payload, progress=progress)
                 elif operation == "transcribe":
                     result = backend.transcribe(**payload)
                 elif operation == "describe":
@@ -88,8 +104,7 @@ def main():
                     "ok": False,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
-            protocol.write(json.dumps(response, ensure_ascii=False, allow_nan=False) + "\n")
-            protocol.flush()
+            send(response)
 
 
 if __name__ == "__main__":
