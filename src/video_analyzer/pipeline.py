@@ -12,7 +12,7 @@ from .media import detect_scenes, extract_audio, extract_frames, probe, windows
 from .models import local_models, required_models, resolve_profile
 from .schema import AnalysisConfig, AnalysisResult, Observation, Scene
 from .storage import Checkpoints, file_hash
-from .timeline import assign_units, normalize_speakers, owned_units, speech_chunks
+from .timeline import assign_units, audio_chunks, normalize_speakers, owned_units, speech_chunks
 from .worker_client import Worker, worker_python
 
 
@@ -26,13 +26,25 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
     profile = resolve_profile(config.profile)
     media = probe(path, config.audio_stream)
     has_audio = media.audio_stream_index is not None
-    models = local_models(config.model_dir, required_models(profile, config.asr, audio=has_audio))
+    audio_enabled = config.transcription or config.diarization
+    required = required_models(
+        profile,
+        config.asr,
+        audio=has_audio,
+        transcription=config.transcription,
+        diarization=config.diarization,
+        scene_description=config.scene_description,
+    )
+    models = local_models(config.model_dir, required) if required else {}
     vision_kind = "molmo-mlx" if profile == "mac" else "molmo-torch"
-    worker_python(config.runtime_dir, "mlx" if profile == "mac" else "torch")
-    if has_audio:
+    if (has_audio and audio_enabled) or (config.scene_description and profile != "mac"):
         worker_python(config.runtime_dir, "torch")
-    if profile == "mac" and config.vision_device != "auto":
-        raise AnalysisError("The mac profile uses MLX/Metal vision; --vision-device must be auto")
+    if config.scene_description and profile == "mac":
+        worker_python(config.runtime_dir, "mlx")
+        if config.vision_device != "auto":
+            raise AnalysisError(
+                "The mac profile uses MLX/Metal vision; --vision-device must be auto"
+            )
 
     def device(requested):
         return (
@@ -88,7 +100,7 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
         else:
             scenes = [Scene.model_validate(scene) for scene in saved]
         speakers, regular, exclusive, units = [], [], [], []
-        if has_audio:
+        if has_audio and audio_enabled:
             audio_path = cache.path / "audio.wav"
             saved_audio = cache.get("audio")
             if (
@@ -99,33 +111,41 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                 progress("Extracting normalized audio")
                 extract_audio(media, audio_path)
                 cache.put("audio", {"size": audio_path.stat().st_size})
-            diarization = cache.get("diarization")
-            if diarization is None:
-                progress("Identifying speakers")
-                with Worker(config.runtime_dir, "torch", config.worker_timeout) as worker:
-                    runtime = worker.request(
-                        "load",
-                        kind="diarization",
-                        model=models["diarization"]["directory"],
-                        device=device(config.diarization_device),
-                    )
-                    diarization = worker.request(
-                        "diarize", audio=str(audio_path.resolve()), num_speakers=config.num_speakers
-                    )
-                    diarization["runtime"] = runtime
-                cache.put("diarization", diarization)
-            runtimes["diarization"] = diarization["runtime"]
-            record_metrics("diarization", diarization)
-            speakers, regular, exclusive = normalize_speakers(
-                diarization["regular"], diarization["exclusive"]
-            )
+            if config.diarization:
+                diarization = cache.get("diarization")
+                if diarization is None:
+                    progress("Identifying speakers")
+                    with Worker(config.runtime_dir, "torch", config.worker_timeout) as worker:
+                        runtime = worker.request(
+                            "load",
+                            kind="diarization",
+                            model=models["diarization"]["directory"],
+                            device=device(config.diarization_device),
+                        )
+                        diarization = worker.request(
+                            "diarize",
+                            audio=str(audio_path.resolve()),
+                            num_speakers=config.num_speakers,
+                        )
+                        diarization["runtime"] = runtime
+                    cache.put("diarization", diarization)
+                runtimes["diarization"] = diarization["runtime"]
+                record_metrics("diarization", diarization)
+                speakers, regular, exclusive = normalize_speakers(
+                    diarization["regular"], diarization["exclusive"]
+                )
             # Keep one ASR worker alive for all chunks, but skip loading it when all
             # chunks are cached or the diarizer detected no speech.
+            chunks = ()
+            if config.transcription:
+                chunks = (
+                    speech_chunks(media.duration, regular)
+                    if config.diarization
+                    else audio_chunks(media.duration)
+                )
             with contextlib.ExitStack() as stack:
                 worker = None
-                for index, core_start, core_end, clip_start, clip_end in speech_chunks(
-                    media.duration, regular
-                ):
+                for index, core_start, core_end, clip_start, clip_end in chunks:
                     name = f"asr/{index:06d}"
                     chunk = cache.get(name)
                     if chunk is None:
@@ -160,13 +180,13 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                             chunk["units"], clip_start, core_start, core_end, media.duration
                         )
                     )
-            if not regular:
+            if (config.diarization and not regular) or (config.transcription and not units):
                 warnings.append(
                     "音声から発話は検出されませんでした。"
                     if config.report_language == "ja"
                     else "No speech was detected in the audio."
                 )
-        else:
+        elif not has_audio and audio_enabled:
             warnings.append(
                 "音声トラックがないため、映像のみを解析しました。"
                 if config.report_language == "ja"
@@ -175,7 +195,7 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
         transcript = list(assign_units(units, exclusive, scenes))
         with contextlib.ExitStack() as stack:
             worker = None
-            for scene in scenes:
+            for scene in scenes if config.scene_description else ():
                 for index, (start, end, targets) in enumerate(
                     windows(scene, config.window_seconds, config.frames_per_window)
                 ):

@@ -93,6 +93,8 @@ mise run analyze input.mp4 --asr qwen --format json -o report.json
 mise run analyze input.mp4 --resume
 mise run analyze input.mp4 --language ja --num-speakers 2
 mise run analyze input.mp4 --report-language en --audio-stream 1
+mise run analyze input.mp4 --no-diarization --no-scene-description
+mise run analyze input.mp4 --no-transcription --no-diarization
 mise run analyze --help
 ```
 
@@ -115,6 +117,9 @@ after all stages succeed. Existing reports are preserved on failure.
 
 | Option | Default | Behavior |
 | --- | --- | --- |
+| `--transcription` / `--no-transcription` | enabled | Enable or disable speech transcription |
+| `--diarization` / `--no-diarization` | enabled | Enable or disable speaker identification |
+| `--scene-description` / `--no-scene-description` | enabled | Enable or disable visual descriptions; scene detection always runs |
 | `--asr` | `whisper` | Whisper or Qwen |
 | `--profile` | `auto` | MLX on Apple Silicon; CUDA elsewhere. Explicit `cpu` is available for large-memory hosts. |
 | `--language` | automatic | Spoken language hint, such as `ja` or `en`; no translation |
@@ -136,6 +141,15 @@ after all stages succeed. Existing reports are preserved on failure.
 Paths are relative to the current directory. Outside this repository, supply
 absolute model and runtime directory paths.
 
+The three features are independent. Use `--no-diarization --no-scene-description`
+for transcription without speaker labels, or `--no-transcription --no-diarization`
+for visual-only analysis. Disabled features do not require their model assets or
+worker environments. Disabling all three produces media metadata and detected
+scene boundaries without requiring any prepared models or model workers.
+`prepare-models` and `doctor` continue to prepare/check the full set of models.
+Markdown reports list the enabled features and omit disabled content sections;
+JSON retains its existing fields, with empty lists for disabled outputs.
+
 ## Python API
 
 ```python
@@ -145,6 +159,12 @@ from video_analyzer import AnalysisConfig, analyze_video, render_json, render_ma
 result = analyze_video(Path("input.mp4"), AnalysisConfig(resume=True))
 Path("report.md").write_text(render_markdown(result), encoding="utf-8")
 Path("report.json").write_text(render_json(result), encoding="utf-8")
+
+# Transcription only, without speaker labels or visual descriptions.
+result = analyze_video(
+    Path("input.mp4"),
+    AnalysisConfig(transcription=True, diarization=False, scene_description=False),
+)
 ```
 
 The API returns a Pydantic `AnalysisResult` without writing a report. Importing it
@@ -169,6 +189,10 @@ ASR separates speech regions at pauses, then uses 20-second core windows with up
 to five seconds of context on each side within a region. Language detection runs
 again for each region, and 0.3-second padding protects words near VAD boundaries;
 timestamp ownership and overlap reconciliation remove boundary duplicates.
+With diarization disabled, transcription instead covers the full recording in
+20-second core windows with up to five seconds of context on each side, and
+transcript speaker IDs remain unset. Scene detection still runs when visual
+descriptions are disabled, retaining scene timestamps and transcript references.
 No-audio videos produce visual reports. Silence produces an empty transcript.
 
 Diarization reports its device, audio duration, and progress through segmentation,

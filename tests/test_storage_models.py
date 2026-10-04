@@ -3,7 +3,7 @@ import json
 import pytest
 
 from video_analyzer.errors import AnalysisError
-from video_analyzer.models import local_models
+from video_analyzer.models import local_models, required_models
 from video_analyzer.storage import Checkpoints, atomic_json, file_hash
 
 
@@ -95,3 +95,18 @@ def test_missing_indexed_shard(tmp_path):
     )
     with pytest.raises(AnalysisError, match="weight shard"):
         local_models(tmp_path, ["whisper"])
+
+
+@pytest.mark.parametrize("profile,vision", [("mac", "molmo-mlx"), ("cuda", "molmo-torch")])
+@pytest.mark.parametrize(
+    "asr,speech",
+    [
+        ("whisper", ["whisper"]),
+        ("qwen", ["qwen", "aligner"]),
+        ("both", ["whisper", "qwen", "aligner"]),
+    ],
+)
+def test_required_models_preserves_defaults(profile, vision, asr, speech):
+    assert required_models(profile, asr) == [vision, "diarization", *speech]
+    assert required_models(profile, asr, audio=False) == [vision]
+    assert required_models(profile, asr, transcription=False) == [vision, "diarization"]

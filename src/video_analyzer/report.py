@@ -25,13 +25,25 @@ def render_json(result: AnalysisResult) -> str:
 
 def render_markdown(result: AnalysisResult) -> str:
     ja = result.report_language == "ja"
+    settings = result.provenance.get("configuration", {})
+    transcription = settings.get("transcription", True)
+    diarization = settings.get("diarization", True)
+    scene_description = settings.get("scene_description", True)
     lines = ["# 動画解析レポート" if ja else "# Video analysis report", ""]
     lines += [
         f"- {'動画' if ja else 'Video'}: {escape(result.media.path)}",
         f"- {'長さ' if ja else 'Duration'}: {timestamp(result.media.duration)}",
-        f"- {'話者数' if ja else 'Speakers'}: {len(result.speakers)}",
-        "",
     ]
+    if diarization:
+        lines.append(f"- {'話者数' if ja else 'Speakers'}: {len(result.speakers)}")
+    for label, enabled in (
+        ("文字起こし" if ja else "Transcription", transcription),
+        ("話者区分" if ja else "Diarization", diarization),
+        ("映像の説明" if ja else "Scene description", scene_description),
+    ):
+        status = ("有効" if enabled else "無効") if ja else ("Enabled" if enabled else "Disabled")
+        lines.append(f"- {label}: {status}")
+    lines.append("")
     lines += ["## モデルと実行環境" if ja else "## Models and runtime", ""]
     for name, entry in result.provenance.get("models", {}).items():
         quant = f" ({entry['quantization']})" if entry.get("quantization") else ""
@@ -56,14 +68,17 @@ def render_markdown(result: AnalysisResult) -> str:
         lines += [
             f"## {'シーン' if ja else 'Scene'} {number}: {timestamp(scene.start)} – {timestamp(scene.end)}",
             "",
-            "### 映像の説明" if ja else "### Visual description",
-            "",
         ]
-        for observation in scene.observations:
-            lines.append(
-                f"- **{timestamp(observation.start)} – {timestamp(observation.end)}**: {escape(observation.description)}"
-            )
-        lines += ["", "### 発話" if ja else "### Speech", ""]
+        if scene_description:
+            lines += ["### 映像の説明" if ja else "### Visual description", ""]
+            for observation in scene.observations:
+                lines.append(
+                    f"- **{timestamp(observation.start)} – {timestamp(observation.end)}**: {escape(observation.description)}"
+                )
+            lines.append("")
+        if not transcription:
+            continue
+        lines += ["### 発話" if ja else "### Speech", ""]
         units = [by_id[unit_id] for unit_id in scene.transcript_ids]
         if not units:
             lines.append("検出された発話はありません。" if ja else "No speech detected.")
@@ -79,9 +94,12 @@ def render_markdown(result: AnalysisResult) -> str:
             if current:
                 groups.append(current)
         for group in groups:
-            speaker = group[0].speaker_id or ("話者不明" if ja else "Unknown speaker")
+            label = ""
+            if diarization:
+                speaker = group[0].speaker_id or ("話者不明" if ja else "Unknown speaker")
+                label = f" · {escape(speaker)}"
             lines.append(
-                f"- **{timestamp(group[0].start)} – {timestamp(group[-1].end)} · {escape(speaker)}**: {escape(join_text(group))}"
+                f"- **{timestamp(group[0].start)} – {timestamp(group[-1].end)}{label}**: {escape(join_text(group))}"
             )
         lines.append("")
     return "\n".join(lines)

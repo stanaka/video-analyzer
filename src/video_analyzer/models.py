@@ -37,10 +37,19 @@ def resolve_profile(profile: str) -> str:
     return profile
 
 
-def required_models(profile: str, asr: str, *, audio=True) -> list[str]:
-    result = ["molmo-mlx" if profile == "mac" else "molmo-torch"]
-    if audio:
-        result += ["diarization"]
+def required_models(
+    profile: str,
+    asr: str,
+    *,
+    audio=True,
+    transcription=True,
+    diarization=True,
+    scene_description=True,
+) -> list[str]:
+    result = ["molmo-mlx" if profile == "mac" else "molmo-torch"] if scene_description else []
+    if audio and diarization:
+        result.append("diarization")
+    if audio and transcription:
         if asr in ("whisper", "both"):
             result += ["whisper"]
         if asr in ("qwen", "both"):

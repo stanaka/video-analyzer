@@ -105,9 +105,29 @@ def parser():
         epilog="Examples:\n"
         "  video-analyzer analyze input.mp4\n"
         "  video-analyzer analyze input.mp4 --asr qwen --format json -o report.json\n"
-        "  video-analyzer analyze input.mp4 --resume --language ja --num-speakers 2",
+        "  video-analyzer analyze input.mp4 --resume --language ja --num-speakers 2\n"
+        "  video-analyzer analyze input.mp4 --no-diarization --no-scene-description\n"
+        "  video-analyzer analyze input.mp4 --no-transcription --no-diarization",
     )
     analyze.add_argument("input", type=Path, help="Path to the local MP4 video")
+    analyze.add_argument(
+        "--transcription",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Transcribe speech (default: enabled)",
+    )
+    analyze.add_argument(
+        "--diarization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Identify speakers; when disabled, transcription uses fixed audio windows without speaker labels (default: enabled)",
+    )
+    analyze.add_argument(
+        "--scene-description",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Describe scene content; scene detection always runs (default: enabled)",
+    )
     analyze.add_argument(
         "--format",
         choices=("markdown", "json"),

@@ -9,6 +9,9 @@ class Record(BaseModel):
 
 
 class AnalysisConfig(Record):
+    transcription: bool = True
+    diarization: bool = True
+    scene_description: bool = True
     asr: Literal["whisper", "qwen"] = "whisper"
     profile: Literal["auto", "mac", "cuda", "cpu"] = "auto"
     model_dir: Path = Path(".models")
