@@ -28,6 +28,69 @@ def rms(samples):
     return np.sqrt(np.mean(samples**2))
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize("normalization,noise_reduction", PROCESSING)
+@pytest.mark.parametrize("count", [1, 199, 16123])
+def test_segment_processing_matches_processing_an_isolated_clip(
+    pcm_audio, tmp_path, normalization, noise_reduction, count
+):
+    # Loud excluded samples must not affect the segment's normalization or filters.
+    samples = 0.9 * np.sin(2 * np.pi * 440 * np.arange(3 * RATE) / RATE)
+    clip = np.zeros(count)
+    clip[0] = clip[-1] = 0.05
+    if count > 1000:
+        clip[count // 2] = 0.05
+    samples[RATE : RATE + count] = clip
+    selected, isolated = tmp_path / "selected.wav", tmp_path / "isolated.wav"
+    options = {"audio_normalization": normalization, "noise_reduction": noise_reduction}
+    extract_audio(pcm_audio(samples), selected, start_time=1, end_time=1 + count / RATE, **options)
+    extract_audio(pcm_audio(clip), isolated, **options)
+    np.testing.assert_array_equal(read_pcm(selected), read_pcm(isolated))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("normalization,noise_reduction", PROCESSING)
+@pytest.mark.parametrize("start,end", [(0.5, 2.5), (0.1, 0.5), (3, 3.5)])
+def test_segment_alignment_and_ranges_outside_audio(
+    ffmpeg, tmp_path, normalization, noise_reduction, start, end
+):
+    path = tmp_path / "delayed.mp4"
+    ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:s=160x120:r=10:d=4",
+        "-itsoffset",
+        "1",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=16000:duration=1",
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "alac",
+        path,
+    )
+    output = tmp_path / "segment.wav"
+    extract_audio(
+        probe(path),
+        output,
+        start_time=start,
+        end_time=end,
+        audio_normalization=normalization,
+        noise_reduction=noise_reduction,
+    )
+    samples = read_pcm(output)
+    assert len(samples) == round((end - start) * RATE)
+    if start == 0.5:
+        assert not np.any(samples[: int(0.45 * RATE)])
+        assert np.max(np.abs(samples[int(0.8 * RATE) : int(1.2 * RATE)])) > 0.01
+        assert not np.any(samples[int(1.8 * RATE) :])
+    else:
+        assert not np.any(samples)
+
+
 def media_info(path, duration=4):
     return MediaInfo(
         path=str(path),
@@ -247,6 +310,20 @@ def test_early_stereo_audio_and_stream_selection(
         start = center - 100
         assert start + np.argmax(np.abs(result[start : start + 200])) == center
         assert abs(result[center]) > 0.01
+    segment = tmp_path / "selected-segment.wav"
+    extract_audio(
+        media,
+        segment,
+        start_time=0.2,
+        end_time=1.9,
+        audio_normalization=normalization,
+        noise_reduction=noise_reduction,
+    )
+    selected = read_pcm(segment)
+    assert len(selected) == round(1.7 * RATE)
+    for timestamp in (0.2, 1.5):
+        center = round(timestamp * RATE)
+        assert center - 100 + np.argmax(np.abs(selected[center - 100 : center + 100])) == center
 
 
 @pytest.mark.parametrize("measurement", ["", "nan", "inf", "invalid", "-20\nPeak level dB: -21"])

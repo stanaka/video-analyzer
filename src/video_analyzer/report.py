@@ -38,6 +38,12 @@ def render_markdown(result: AnalysisResult) -> str:
         f"- {'動画' if ja else 'Video'}: {escape(result.media.path)}",
         f"- {'長さ' if ja else 'Duration'}: {timestamp(result.media.duration)}",
     ]
+    analysis_range = result.provenance.get("analysis_range")
+    if analysis_range is not None:
+        lines.append(
+            f"- {'解析範囲' if ja else 'Analysis range'}: "
+            f"{timestamp(analysis_range['start'])} – {timestamp(analysis_range['end'])}"
+        )
     if diarization:
         lines.append(f"- {'話者数' if ja else 'Speakers'}: {len(result.speakers)}")
     for label, enabled in (

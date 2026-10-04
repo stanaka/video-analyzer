@@ -244,6 +244,8 @@ existing selected report intact.
 
 | Option | Default | Behavior |
 | --- | --- | --- |
+| `--start-time` | `0` | Start analysis at numeric seconds, `MM:SS`, or `HH:MM:SS`; fractional seconds are supported |
+| `--end-time` | video end | Stop analysis at the specified original-video time, using the same formats |
 | `--format` | `markdown` | `markdown`, `json`, or an interactive `html` report; JSON is always saved |
 | `--config` | none | Load YAML analysis settings; explicit CLI options override individual settings |
 | `--show-settings` | disabled | Print all merged analysis settings as YAML to stderr before starting analysis |
@@ -291,6 +293,29 @@ Markdown reports list the enabled features and omit disabled content sections;
 JSON retains its existing fields, with empty lists for disabled outputs.
 
 ### YAML configuration and pyannote tuning
+
+Analyze a selected segment with original-video timestamps:
+
+```sh
+video-analyzer analyze input.mp4 --start-time 01:30 --end-time 00:03:00.5
+```
+
+Either bound may be omitted. The start must be before the video's end; the end
+must be after the start and no later than the video's end. Audio preprocessing,
+speech models, scene detection, and visual descriptions use the selected segment.
+Normalization measures only that segment. Reports retain the original video's
+metadata and duration, show the analysis range, and keep all timestamps relative
+to the original video. HTML playback and its timeline cover the selected range.
+Different ranges have separate resumable checkpoints.
+
+The Python API accepts `AnalysisConfig(start_time="01:30", end_time=180.5)`.
+YAML uses `start_time` and `end_time`; quote timestamp strings to avoid YAML's
+implicit numeric conversion:
+
+```yaml
+start_time: "01:30"
+end_time: "00:03:00.5"
+```
 
 Use `--config FILE` on `analyze` to load any `AnalysisConfig` settings by their
 snake_case field names. The input video, `--output`, and `--format` remain CLI
@@ -380,7 +405,8 @@ mise run analyze input.mp4 --audio-normalization off --no-noise-reduction
 `peak` makes two passes: it measures the highest sample peak after any noise
 reduction, then applies one constant gain to reach -3 dBFS. Quiet and loud
 passages retain their relative levels, and a single loud moment limits the gain
-for the whole recording. Digital silence remains silent.
+for the selected analysis range (the whole recording by default). Digital silence
+remains silent.
 
 `dynamic` uses FFmpeg's
 [`dynaudnorm`](https://ffmpeg.org/ffmpeg-filters.html#dynaudnorm) with 500 ms frames
@@ -436,7 +462,7 @@ Click anywhere in a timeline lane or its ruler to seek, play, and scroll the
 transcript pane to the matching passage. Overlapping speech prefers the clicked
 speaker's passage; a click in a silent gap shows the next passage, or the last
 passage after speech ends. Transcript and scene entries also jump to their timestamps.
-Use **Zoom** and horizontal scrolling for detail, or **Fit** for the full recording.
+Use **Zoom** and horizontal scrolling for detail, or **Fit** for the full analysis range.
 Focused speech blocks support Enter, and the focused timeline supports Space to
 play/pause and arrow keys to seek five seconds. The player controls are keyboard
 accessible. Scene descriptions, the transcript, provenance, and warnings are
@@ -519,6 +545,8 @@ speakers, regular/exclusive turns, timed transcript units, scenes, observations,
 and warnings. Times are seconds relative to video start. Scenes reference
 canonical transcript IDs; a unit crossing a cut is represented once. Overlapping
 diarization is retained even though text receives one speaker assignment.
+`provenance.analysis_range` records the effective `{start, end}` bounds in seconds;
+older results without it are treated as full-video analyses.
 `provenance.stage_metrics` records inference time and peak memory measurements
 from completed work, including reused checkpoints. Runtime load measurements are
 separate; `provenance.elapsed_seconds` measures the current API invocation. MLX
@@ -527,12 +555,13 @@ device allocation and process RSS overlap on unified memory and must not be adde
 ## Processing and recovery
 
 Audio extraction preserves stream offsets, padding delayed audio and trimming
-audio before video start. Full-recording diarization preserves speaker identities.
+audio to the selected video-relative range. Diarization preserves speaker identities
+throughout that range.
 ASR separates speech regions at pauses, then uses 20-second core windows with up
 to five seconds of context on each side within a region. Language detection runs
 again for each region, and 0.3-second padding protects words near VAD boundaries;
 timestamp ownership and overlap reconciliation remove boundary duplicates.
-With diarization disabled, transcription instead covers the full recording in
+With diarization disabled, transcription instead covers the selected range in
 20-second core windows with up to five seconds of context on each side, and
 transcript speaker IDs remain unset. Scene detection still runs when visual
 descriptions are disabled, retaining scene timestamps and transcript references.

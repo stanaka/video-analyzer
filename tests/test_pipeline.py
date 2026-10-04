@@ -86,6 +86,149 @@ def fake_models(monkeypatch):
     return Worker
 
 
+@pytest.mark.parametrize("backend", ["pyannote", "sortformer", "nemotron"])
+@pytest.mark.parametrize("diarization", [False, True])
+@pytest.mark.parametrize("asr", ["whisper", "qwen"])
+def test_selected_range_uses_local_audio_and_original_report_times(
+    simulated_media, fake_models, tmp_path, monkeypatch, backend, diarization, asr
+):
+    path, media, calls = simulated_media
+    fake_models.turns = [{"start": -1, "end": 100, "speaker_id": "A"}]
+    audio_options = []
+    original = pipeline.extract_audio
+
+    def extract(info, target, **options):
+        audio_options.append(options)
+        return original(info, target, **options)
+
+    monkeypatch.setattr(pipeline, "extract_audio", extract)
+    config = AnalysisConfig(
+        profile="cpu",
+        work_dir=tmp_path / "work",
+        start_time="00:10",
+        end_time="00:40",
+        diarization=diarization,
+        diarization_backend=backend,
+        asr=asr,
+    )
+    result = pipeline.analyze_video(path, config)
+    assert result.media.duration == media.duration == 55
+    assert result.provenance["analysis_range"] == {"start": 10, "end": 40}
+    assert audio_options[0]["start_time"] == 10 and audio_options[0]["end_time"] == 40
+    assert [(scene.start, scene.end) for scene in result.scenes] == [(10, 25), (25, 40)]
+    requests = [payload for op, payload in fake_models.requests if op == "transcribe"]
+    assert [(request["start"], request["end"]) for request in requests] == [(0, 25), (15, 30)]
+    assert [unit.start for unit in result.transcript] == [15, 30]
+    assert all(
+        10 <= span.start <= span.end <= 40 for span in result.transcript + result.diarization
+    )
+    if diarization:
+        assert [(turn.start, turn.end) for turn in result.diarization] == [(10, 40)]
+    assert "00:00:10.000 – 00:00:40.000" in render_markdown(result)
+    assert AnalysisResult.model_validate_json(render_json(result)) == result
+    previous = list(fake_models.requests)
+    equivalent = AnalysisConfig(
+        **{**config.model_dump(), "start_time": 10, "end_time": 40, "resume": True}
+    )
+    pipeline.analyze_video(path, equivalent)
+    assert fake_models.requests == previous and calls["audio"] == 1
+    pipeline.analyze_video(path, equivalent.model_copy(update={"start_time": 20}))
+    assert calls["audio"] == 2
+
+
+def test_interrupted_segment_resumes_with_original_timestamps(
+    simulated_media, fake_models, tmp_path
+):
+    path, _, calls = simulated_media
+    config = AnalysisConfig(
+        profile="cpu",
+        work_dir=tmp_path / "work",
+        start_time=10,
+        end_time=40,
+        diarization=False,
+        resume=True,
+    )
+    fake_models.fail_transcribe_at = 2
+    with pytest.raises(AnalysisError, match="interrupted ASR"):
+        pipeline.analyze_video(path, config)
+    fake_models.fail_transcribe_at = None
+    result = pipeline.analyze_video(path, config)
+    assert fake_models.transcriptions == 3 and calls["audio"] == 1 and calls["scenes"] == 1
+    assert [unit.start for unit in result.transcript] == [15, 30]
+
+
+@pytest.mark.parametrize("bounds", [{"start_time": 55}, {"start_time": 56}, {"end_time": 56}])
+def test_range_duration_validation_precedes_models_and_checkpoints(
+    simulated_media, monkeypatch, tmp_path, bounds
+):
+    path, _, calls = simulated_media
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Models must not be checked for an invalid range")
+
+    monkeypatch.setattr(pipeline, "local_models", unexpected)
+    work = tmp_path / "work"
+    with pytest.raises(AnalysisError, match="video duration"):
+        pipeline.analyze_video(path, AnalysisConfig(profile="cpu", work_dir=work, **bounds))
+    assert not work.exists() and calls == {"scenes": 0, "audio": 0, "frames": 0}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "bounds,expected",
+    [
+        ({"start_time": 1}, (1, 4)),
+        ({"end_time": 3}, (0, 3)),
+        ({"start_time": 1, "end_time": 3}, (1, 3)),
+    ],
+)
+def test_selected_range_without_audio(video, tmp_path, fake_models, bounds, expected):
+    result = pipeline.analyze_video(
+        video, AnalysisConfig(profile="cpu", work_dir=tmp_path / "work", **bounds)
+    )
+    assert result.scenes[0].start == expected[0] and result.scenes[-1].end == expected[1]
+    assert result.media.duration == 4
+    assert not result.transcript and not result.diarization
+    assert all(
+        expected[0] <= time < expected[1]
+        for scene in result.scenes
+        for obs in scene.observations
+        for time in obs.frame_timestamps
+    )
+
+
+@pytest.mark.integration
+def test_cli_segment_html_without_models(video, tmp_path):
+    output = tmp_path / "range.html"
+    assert (
+        main(
+            [
+                "analyze",
+                str(video),
+                "--profile",
+                "cpu",
+                "--start-time",
+                "00:01",
+                "--end-time",
+                "00:00:03",
+                "--no-transcription",
+                "--no-diarization",
+                "--no-scene-description",
+                "--format",
+                "html",
+                "-o",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    result = AnalysisResult.model_validate_json(output.with_suffix(".json").read_text())
+    assert result.provenance["analysis_range"] == {"start": 1, "end": 3}
+    assert result.media.duration == 4
+    assert [(scene.start, scene.end) for scene in result.scenes] == [(1, 2), (2, 3)]
+    assert result.provenance["models"] == {} and output.is_file()
+
+
 @pytest.fixture
 def simulated_media(monkeypatch, tmp_path):
     path = tmp_path / "input.mp4"
@@ -102,16 +245,23 @@ def simulated_media(monkeypatch, tmp_path):
     )
     calls = {"scenes": 0, "audio": 0, "frames": 0}
 
-    def scenes(*_):
+    def scenes(*_, start_time=0, end_time=55):
         calls["scenes"] += 1
-        return [Scene(id="scene_0001", start=0, end=25), Scene(id="scene_0002", start=25, end=55)]
+        spans = [(max(start_time, start), min(end_time, end)) for start, end in [(0, 25), (25, 55)]]
+        return [
+            Scene(id=f"scene_{i + 1:04d}", start=start, end=end)
+            for i, (start, end) in enumerate(span for span in spans if span[1] > span[0])
+        ]
 
     def audio(_, target, **options):
         calls["audio"] += 1
         target.write_bytes(b"fixture audio")
 
-    def frames(_, targets, directory, edge):
+    def frames(_, targets, directory, edge, **options):
         calls["frames"] += 1
+        assert all(
+            options.get("start_time", 0) <= time < options.get("end_time", 55) for time in targets
+        )
         directory.mkdir(parents=True)
         frame = directory / "frame.jpg"
         frame.write_bytes(b"fixture frame")

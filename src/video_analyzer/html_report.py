@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .errors import AnalysisError
-from .media import extract_audio, extract_original_audio, probe_streams
+from .media import extract_audio, extract_original_audio, probe_streams, resolve_range
 from .schema import AnalysisResult
 from .storage import atomic_text, file_hash
 
@@ -99,14 +99,20 @@ def write_html(
     if normalization not in ("off", "peak", "dynamic") or not isinstance(denoise, bool):
         raise AnalysisError("Invalid audio preprocessing settings in the analysis result")
     media = result.media.model_copy(update={"path": str(source)})
+    analysis_range = result.provenance.get("analysis_range", {"start": 0, "end": media.duration})
+    if not isinstance(analysis_range, dict) or set(analysis_range) != {"start", "end"}:
+        raise AnalysisError("Invalid analysis range in the analysis result")
+    start, end = resolve_range(media, analysis_range["start"], analysis_range["end"])
+    range_options = {"start_time": start, "end_time": end} if start or end != media.duration else {}
     has_audio = media.audio_stream_index is not None
     original_sidecar = has_audio and audio_count > 1
     processed_sidecar = has_audio and (normalization != "off" or denoise)
     playback = {
         "video": _relative_url(source, output),
         # MP4 edit lists retain the delay before the first video sample in the
-        # browser media timeline. Sidecars instead start at analysis time zero.
+        # browser media timeline. Sidecar sample zero is the selected range start.
         "video_start": media.video_start,
+        "audio_start": start,
         "original": None,
         "processed": None,
         "normalization": normalization,
@@ -124,13 +130,14 @@ def write_html(
                     continue
                 audio_path = generation / f"{name}.wav"
                 if name == "original":
-                    extract_original_audio(media, audio_path)
+                    extract_original_audio(media, audio_path, **range_options)
                 else:
                     extract_audio(
                         media,
                         audio_path,
                         audio_normalization=normalization,
                         noise_reduction=denoise,
+                        **range_options,
                     )
                 playback[name] = _relative_url(audio_path, output)
         document = render_html(result, playback)

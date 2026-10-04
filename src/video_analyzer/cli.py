@@ -114,6 +114,7 @@ def parser(*, sparse=False):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
         "  video-analyzer analyze input.mp4\n"
+        "  video-analyzer analyze input.mp4 --start-time 01:30 --end-time 00:03:00.5\n"
         "  video-analyzer analyze input.mp4 --config settings.yaml --max-speakers 4\n"
         "  video-analyzer analyze input.mp4 --asr qwen --format json -o report.json\n"
         "  video-analyzer analyze input.mp4 --format html --audio-normalization dynamic --noise-reduction\n"
@@ -123,6 +124,15 @@ def parser(*, sparse=False):
         "  video-analyzer analyze input.mp4 --no-transcription --no-diarization",
     )
     analyze.add_argument("input", type=Path, help="Path to the local MP4 video")
+    analyze.add_argument(
+        "--start-time",
+        default=0,
+        help="Start analysis at seconds, MM:SS, or HH:MM:SS; fractions are allowed (default: 0)",
+    )
+    analyze.add_argument(
+        "--end-time",
+        help="Stop analysis at seconds, MM:SS, or HH:MM:SS; fractions are allowed (default: video end)",
+    )
     analyze.add_argument(
         "--config",
         type=Path,
@@ -232,7 +242,7 @@ def parser(*, sparse=False):
         "--audio-normalization",
         choices=("off", "peak", "dynamic"),
         default="off",
-        help="Normalize audio before transcription and diarization: peak adjusts the whole recording to -3 dBFS; dynamic gently balances quiet and loud passages (default: %(default)s)",
+        help="Normalize audio before transcription and diarization: peak adjusts the selected analysis range to -3 dBFS; dynamic gently balances quiet and loud passages (default: %(default)s)",
     )
     analyze.add_argument(
         "--noise-reduction",

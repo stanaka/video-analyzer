@@ -31,6 +31,8 @@ def test_empty_yaml_uses_defaults(tmp_path, captured_config, document):
 
 def test_all_analysis_fields_load_from_yaml(tmp_path, captured_config):
     settings = {
+        "start_time": 10,
+        "end_time": 90.5,
         "transcription": False,
         "diarization": True,
         "scene_description": False,
@@ -69,6 +71,61 @@ def test_all_analysis_fields_load_from_yaml(tmp_path, captured_config):
     path.write_text(yaml.safe_dump(settings))
     assert cli.main(["analyze", "input.mp4", "--config", str(path)]) == 1
     assert captured_config[0][1] == AnalysisConfig(**settings)
+
+
+@pytest.mark.parametrize(
+    "value,seconds",
+    [(90.5, 90.5), ("90.5", 90.5), ("01:30.5", 90.5), ("00:01:30.5", 90.5), ("90:00", 5400)],
+)
+def test_analysis_time_formats(value, seconds):
+    config = AnalysisConfig(start_time=value, end_time=6000)
+    assert config.start_time == seconds
+    assert config.model_dump(mode="json")["start_time"] == seconds
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        -1,
+        "-00:01",
+        True,
+        False,
+        "NaN",
+        "inf",
+        float("inf"),
+        "01:60",
+        "01:60:00",
+        "1:2:3:4",
+        "1::2",
+        "1:2.3.4",
+        "",
+        None,
+    ],
+)
+def test_invalid_analysis_start_time(value):
+    with pytest.raises(ValidationError):
+        AnalysisConfig(start_time=value)
+
+
+@pytest.mark.parametrize("end", [0, 2, -1, True, "00:60", "NaN"])
+def test_invalid_analysis_end_time(end):
+    with pytest.raises(ValidationError):
+        AnalysisConfig(start_time=2, end_time=end)
+
+
+def test_range_cli_overrides_yaml_and_show_settings(tmp_path, captured_config, capsys):
+    path = tmp_path / "settings.yaml"
+    path.write_text('start_time: "01:30"\nend_time: "00:03:00.5"\n')
+    assert (
+        cli.main(
+            ["analyze", "input.mp4", "--config", str(path), "--start-time", "0", "--show-settings"]
+        )
+        == 1
+    )
+    assert captured_config[0][1] == AnalysisConfig(start_time=0, end_time=180.5)
+    assert "end_time: 180.5" in capsys.readouterr().err
+    assert cli.main(["analyze", "input.mp4", "--config", str(path), "--end-time", "200"]) == 1
+    assert captured_config[1][1] == AnalysisConfig(start_time=90, end_time=200)
 
 
 def test_yaml_boolean_resolution_preserves_off_and_does_not_change_pyyaml(tmp_path):

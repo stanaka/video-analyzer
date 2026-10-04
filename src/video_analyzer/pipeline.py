@@ -9,7 +9,7 @@ from pathlib import Path
 from . import __version__
 from .diarization import DIARIZATION_MODELS, DIARIZATION_RUNTIMES, NEMO_DIARIZERS
 from .errors import AnalysisError
-from .media import detect_scenes, extract_audio, extract_frames, probe, windows
+from .media import detect_scenes, extract_audio, extract_frames, probe, resolve_range, windows
 from .models import local_models, required_models, resolve_profile
 from .schema import AnalysisConfig, AnalysisResult, Observation, Scene
 from .storage import Checkpoints, file_hash
@@ -26,6 +26,14 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
     path = Path(path).expanduser().resolve()
     profile = resolve_profile(config.profile)
     media = probe(path, config.audio_stream)
+    range_start, range_end = resolve_range(media, config.start_time, config.end_time)
+    duration = range_end - range_start
+    analysis_range = {"start": range_start, "end": range_end}
+    range_options = (
+        {"start_time": range_start, "end_time": range_end}
+        if range_start or range_end != media.duration
+        else {}
+    )
     has_audio = media.audio_stream_index is not None
     audio_enabled = config.transcription or config.diarization
     required = required_models(
@@ -78,6 +86,7 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
         "input_sha256": file_hash(path),
         "application_version": __version__,
         "configuration": settings,
+        "analysis_range": analysis_range,
         "profile": profile,
         "models": model_provenance,
         "model_files_sha256": manifest_hash,
@@ -106,7 +115,9 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
         saved = cache.get("scenes")
         if saved is None:
             progress("Detecting scenes")
-            scenes = detect_scenes(media, config.scene_threshold, config.min_scene_seconds)
+            scenes = detect_scenes(
+                media, config.scene_threshold, config.min_scene_seconds, **range_options
+            )
             cache.put("scenes", [scene.model_dump() for scene in scenes])
         else:
             scenes = [Scene.model_validate(scene) for scene in saved]
@@ -125,6 +136,7 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                     audio_normalization=config.audio_normalization,
                     noise_reduction=config.noise_reduction,
                     progress=progress,
+                    **range_options,
                 )
                 cache.put("audio", {"size": audio_path.stat().st_size})
             if config.diarization:
@@ -164,17 +176,25 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                     cache.put("diarization", diarization)
                 runtimes["diarization"] = diarization["runtime"]
                 record_metrics("diarization", diarization)
+
+                def bounded_turns(turns):
+                    return [
+                        {**turn, "start": max(0, turn["start"]), "end": min(duration, turn["end"])}
+                        for turn in turns
+                        if min(duration, turn["end"]) > max(0, turn["start"])
+                    ]
+
                 speakers, regular, exclusive = normalize_speakers(
-                    diarization["regular"], diarization["exclusive"]
+                    bounded_turns(diarization["regular"]), bounded_turns(diarization["exclusive"])
                 )
             # Keep one ASR worker alive for all chunks, but skip loading it when all
             # chunks are cached or the diarizer detected no speech.
             chunks = ()
             if config.transcription:
                 chunks = (
-                    speech_chunks(media.duration, regular)
+                    speech_chunks(duration, regular)
                     if config.diarization
-                    else audio_chunks(media.duration)
+                    else audio_chunks(duration)
                 )
             with contextlib.ExitStack() as stack:
                 worker = None
@@ -195,7 +215,9 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                             if config.asr == "qwen":
                                 options["aligner"] = models["aligner"]["directory"]
                             runtime = worker.request("load", **options)
-                        progress(f"Transcribing {core_start:.1f}–{core_end:.1f}s")
+                        progress(
+                            f"Transcribing {core_start + range_start:.1f}–{core_end + range_start:.1f}s"
+                        )
                         chunk = worker.request(
                             "transcribe",
                             audio=str(audio_path.resolve()),
@@ -209,9 +231,7 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                     record_metrics("asr", chunk)
                     warnings.extend(chunk.get("warnings", []))
                     units.extend(
-                        owned_units(
-                            chunk["units"], clip_start, core_start, core_end, media.duration
-                        )
+                        owned_units(chunk["units"], clip_start, core_start, core_end, duration)
                     )
             if (config.diarization and not regular) or (config.transcription and not units):
                 warnings.append(
@@ -225,6 +245,9 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                 if config.report_language == "ja"
                 else "No audio track; analyzed video only."
             )
+        for span in [*units, *regular, *exclusive]:
+            span.start += range_start
+            span.end += range_start
         transcript = list(assign_units(units, exclusive, scenes))
         with contextlib.ExitStack() as stack:
             worker = None
@@ -253,7 +276,7 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                         progress(f"Describing {scene.id} {start:.1f}–{end:.1f}s")
                         frame_dir = cache.path / "frames" / f"{scene.id}-{index:06d}"
                         frames, timestamps = extract_frames(
-                            media, targets, frame_dir, config.frame_long_edge
+                            media, targets, frame_dir, config.frame_long_edge, **range_options
                         )
                         response = worker.request(
                             "describe",
@@ -293,6 +316,7 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                 "profile": profile,
                 "input_sha256": identity["input_sha256"],
                 "configuration": settings,
+                "analysis_range": analysis_range,
                 "elapsed_seconds": time.monotonic() - started,
             },
             speakers=speakers,

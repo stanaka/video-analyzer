@@ -30,6 +30,49 @@ def asset_path(output, url):
     return (output.parent / unquote(url)).resolve()
 
 
+@pytest.mark.integration
+def test_segment_export_regenerates_matching_audio(viewer_result, tmp_path):
+    result = viewer_result
+    result.provenance["analysis_range"] = {"start": 2.25, "end": 5.75}
+    output = write_html(result, tmp_path / "segment.html")
+    data = embedded(output.read_text())
+    playback = data["playback"]
+    assert playback["video_start"] == 1 and playback["audio_start"] == 2.25
+    assert data["result"]["media"]["duration"] == 12
+    for name, rate in [("original", 48000), ("processed", 16000)]:
+        with wave.open(str(asset_path(output, playback[name]))) as audio:
+            assert audio.getnframes() / rate == pytest.approx(3.5, abs=1 / rate)
+    expected = tmp_path / "expected.wav"
+    extract_audio(
+        result.media,
+        expected,
+        start_time=2.25,
+        end_time=5.75,
+        audio_normalization="dynamic",
+        noise_reduction=True,
+    )
+    assert asset_path(output, playback["processed"]).read_bytes() == expected.read_bytes()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"start": -1, "end": 5},
+        {"start": 3, "end": 13},
+        {"start": 3, "end": 2},
+        {"start": 2},
+        {"start": True, "end": 5},
+    ],
+)
+def test_export_rejects_invalid_range_before_publication(viewer_result, tmp_path, bounds):
+    viewer_result.provenance["analysis_range"] = bounds
+    output = tmp_path / "bad.html"
+    with pytest.raises(AnalysisError, match="range|time"):
+        write_html(viewer_result, output)
+    assert not output.exists() and not output.with_suffix(".media").exists()
+
+
 def no_audio_result(video):
     return AnalysisResult(
         application_version="0.1.0",

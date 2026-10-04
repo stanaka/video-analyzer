@@ -102,6 +102,29 @@ def _peak_gain(args: list[str], filters: str, timeout: float) -> float:
     return -3.0 - peak
 
 
+def resolve_range(
+    media: MediaInfo, start_time: float = 0, end_time: float | None = None
+) -> tuple[float, float]:
+    """Validate video-relative bounds before any model or checkpoint work."""
+    end_time = media.duration if end_time is None else end_time
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+        for value in (start_time, end_time)
+    ):
+        raise AnalysisError("Analysis range must contain finite numeric seconds")
+    if not 0 <= start_time < media.duration:
+        raise AnalysisError("start_time must be nonnegative and less than the video duration")
+    if not start_time < end_time <= media.duration:
+        raise AnalysisError("end_time must exceed start_time and not exceed the video duration")
+    return float(start_time), float(end_time)
+
+
+def _audio_trim(start: float, end: float) -> list[str]:
+    if start == 0:
+        return [f"atrim=end={end:.9f}"]
+    return [f"atrim=start={start:.9f}:end={end:.9f}", "asetpts=PTS-STARTPTS"]
+
+
 def extract_audio(
     media: MediaInfo,
     target: Path,
@@ -109,8 +132,16 @@ def extract_audio(
     audio_normalization: Literal["off", "peak", "dynamic"] = "off",
     noise_reduction: bool = False,
     progress: Callable[[str], None] | None = None,
+    start_time: float = 0,
+    end_time: float | None = None,
 ) -> None:
-    """Make optionally processed PCM aligned to video time zero, in bounded memory."""
+    """Make processed PCM with sample zero at the selected video-relative start.
+
+    Alignment and padding precede selection so ranges after audio EOF still yield
+    silence. Only selected samples reach normalization and denoising filters.
+    """
+    start, end = resolve_range(media, start_time, end_time)
+    duration = end - start
     if audio_normalization not in ("off", "peak", "dynamic"):
         raise AnalysisError(f"Unknown audio normalization mode: {audio_normalization}")
     temporary = target.with_suffix(".partial.wav")
@@ -130,9 +161,7 @@ def extract_audio(
     if noise_reduction or audio_normalization != "off":
         # Downmix and resample in floating point before measuring or changing gain.
         filters.append("aformat=sample_fmts=fltp:channel_layouts=mono")
-    filters.extend(
-        ["aresample=16000:async=1:first_pts=0", "apad", f"atrim=end={media.duration:.9f}"]
-    )
+    filters.extend(["aresample=16000:async=1:first_pts=0", "apad", *_audio_trim(start, end)])
     if noise_reduction:
         processing.append("noise reduction")
         # afftdn delays samples by two 1/80-second hops (400 samples at 16 kHz).
@@ -144,7 +173,7 @@ def extract_audio(
                 "afftdn=nr=10:nf=-50:tn=1:gs=5",
                 "atrim=start_sample=400",
                 "asetpts=PTS-STARTPTS",
-                f"atrim=end={media.duration:.9f}",
+                f"atrim=end={duration:.9f}",
             ]
         )
     if audio_normalization != "off":
@@ -188,12 +217,15 @@ def extract_audio(
         temporary.unlink(missing_ok=True)
 
 
-def extract_original_audio(media: MediaInfo, target: Path) -> None:
+def extract_original_audio(
+    media: MediaInfo, target: Path, *, start_time: float = 0, end_time: float | None = None
+) -> None:
     """Decode the selected track as PCM16, retaining its sample rate and channels.
 
     Only align/pad/trim to the video; do not normalize, denoise, or downmix.
     This provides portable track selection for browsers that ignore audioTracks.
     """
+    start, end = resolve_range(media, start_time, end_time)
     temporary = target.with_suffix(".partial.wav")
     try:
         run_media(
@@ -211,7 +243,7 @@ def extract_original_audio(media: MediaInfo, target: Path) -> None:
                 "-vn",
                 "-af",
                 f"asetpts=PTS-({media.video_start:.9f})/TB,"
-                f"aresample=async=1:first_pts=0,apad,atrim=end={media.duration:.9f}",
+                "aresample=async=1:first_pts=0,apad," + ",".join(_audio_trim(start, end)),
                 "-c:a",
                 "pcm_s16le",
                 str(temporary),
@@ -223,22 +255,55 @@ def extract_original_audio(media: MediaInfo, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def detect_scenes(media: MediaInfo, threshold: float, minimum: float) -> list[Scene]:
+def detect_scenes(
+    media: MediaInfo,
+    threshold: float,
+    minimum: float,
+    *,
+    start_time: float = 0,
+    end_time: float | None = None,
+) -> list[Scene]:
     import av
     from scenedetect import SceneManager
     from scenedetect.backends.pyav import VideoStreamAv
     from scenedetect.detectors import AdaptiveDetector
 
+    start_time, end_time = resolve_range(media, start_time, end_time)
+
+    # Filter by actual presentation times, including VFR and sub-frame bounds.
+    class RangeVideoStream(VideoStreamAv):
+        accepted_frames = 0
+
+        def read(self, decode=True):
+            previous = self._frame
+            while super().read(decode=False) is not False:
+                timestamp = self.position.seconds
+                if timestamp >= end_time:
+                    self._frame = previous
+                    return False
+                if timestamp >= start_time:
+                    self.accepted_frames += 1
+                    return self._frame.to_ndarray(format="bgr24") if decode else True
+            return False
+
     # PyAV supplies presentation timecodes in PySceneDetect 0.7, including VFR.
     av.logging.set_level(av.logging.ERROR)
     # Open the PTS-aware backend directly; never silently fall back to frame/FPS times.
-    video = VideoStreamAv(media.path, suppress_output=True, threading_mode="NONE")
+    video = RangeVideoStream(media.path, suppress_output=True, threading_mode="NONE")
     manager = SceneManager()
     manager.add_detector(AdaptiveDetector(adaptive_threshold=threshold, min_scene_len=minimum))
     try:
-        count = manager.detect_scenes(video=video, show_progress=False)
-        if count == 0:
-            raise AnalysisError("No video frames could be decoded")
+        if start_time:
+            # Seek directly by PTS; VideoStreamAv.seek converts seconds through FPS.
+            stream = video._video_stream
+            video._container.seek(
+                int((media.video_start + start_time) / stream.time_base),
+                stream=stream,
+                backward=True,
+            )
+        manager.detect_scenes(video=video, show_progress=False)
+        if video.accepted_frames == 0:
+            raise AnalysisError("Analysis range contains no decodable video frames")
         detected = manager.get_scene_list(start_in_scene=True)
     finally:
         # VideoStreamAv exposes its container, but not a public close() in 0.7.1.
@@ -246,11 +311,11 @@ def detect_scenes(media: MediaInfo, threshold: float, minimum: float) -> list[Sc
         if container is not None:
             container.close()
         video._io.close()
-    starts = [0.0] + [
-        float(start.seconds) for start, _ in detected if 0 < start.seconds < media.duration
+    starts = [start_time] + [
+        float(start.seconds) for start, _ in detected[1:] if start_time < start.seconds < end_time
     ]
     starts = sorted(set(starts))
-    ends = starts[1:] + [media.duration]
+    ends = starts[1:] + [end_time]
     return [
         Scene(id=f"scene_{i + 1:04d}", start=start, end=end)
         for i, (start, end) in enumerate(zip(starts, ends, strict=True))
@@ -268,12 +333,19 @@ def windows(scene: Scene, seconds: float, frames: int):
 
 
 def extract_frames(
-    media: MediaInfo, targets: list[float], directory: Path, edge: int
+    media: MediaInfo,
+    targets: list[float],
+    directory: Path,
+    edge: int,
+    *,
+    start_time: float = 0,
+    end_time: float | None = None,
 ) -> tuple[list[str], list[float]]:
     """Decode a bounded window, selecting actual frames using presentation times."""
     import av
     from PIL import Image
 
+    start_time, end_time = resolve_range(media, start_time, end_time)
     av.logging.set_level(av.logging.ERROR)
     directory.mkdir(parents=True, exist_ok=True)
     paths, timestamps = [], []
@@ -300,6 +372,10 @@ def extract_frames(
             if frame.pts is None:
                 continue
             timestamp = float(frame.pts * frame.time_base) - media.video_start
+            if timestamp < start_time:
+                continue
+            if timestamp >= end_time:
+                break
             while pending < len(targets) and timestamp > targets[pending]:
                 save(
                     previous if previous is not None else frame,

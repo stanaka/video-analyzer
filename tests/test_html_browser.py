@@ -74,6 +74,49 @@ def assert_sync(page, offset=1):
 
 
 @pytest.mark.parametrize("mode", ["original", "processed"])
+def test_segment_playback_offsets_limits_and_replay(page, viewer_result, tmp_path, mode):
+    result = viewer_result
+    start, end = 2.25, 5.75
+    result.provenance["analysis_range"] = {"start": start, "end": end}
+    result.scenes[0].start = start
+    result.scenes[0].end = end
+    for observation in result.scenes[0].observations:
+        observation.start, observation.end = start, end
+        observation.frame_timestamps = [3]
+    result.transcript = [unit for unit in result.transcript if start <= unit.start < end]
+    result.diarization = [
+        turn.model_copy(update={"start": max(start, turn.start), "end": min(end, turn.end)})
+        for turn in result.diarization
+        if turn.start < end and turn.end > start
+    ]
+    load(page, result, tmp_path)
+    assert page.locator("#seek").get_attribute("min") == str(start)
+    assert page.locator("#seek").get_attribute("max") == str(end)
+    assert "Analysis range 00:02.250 – 00:05.750" in page.locator("#summary").inner_text()
+    assert page.locator(".tick").first.inner_text() == "00:02.250"
+    page.wait_for_function("Math.abs(document.querySelector('#video').currentTime - 3.25) < 0.01")
+    page.locator("#audio-mode").select_option(mode)
+    page.locator("#play").click()
+    assert_sync(page, offset=3.25)
+    page.locator("#play").click()
+    seek_paused(page, -10)
+    assert page.locator("#video").evaluate("v => v.currentTime") == pytest.approx(3.25, abs=0.01)
+    lane = page.locator(".track-body").first.bounding_box()
+    page.mouse.click(lane["x"] + lane["width"] / 2, lane["y"] + lane["height"] / 2)
+    assert_sync(page, offset=3.25)
+    assert page.locator("#video").evaluate("v => v.currentTime") == pytest.approx(5, abs=0.35)
+    page.locator("#play").click()
+    seek_paused(page, end - 0.15)
+    page.locator("#play").click()
+    page.wait_for_function("document.querySelector('#video').paused")
+    assert page.locator("#video").evaluate("v => v.currentTime") == pytest.approx(end + 1, abs=0.04)
+    assert page.locator("#" + mode + "-audio").evaluate("a => a.paused")
+    page.locator("#play").click()
+    assert_sync(page, offset=3.25)
+    assert page.locator("#video").evaluate("v => v.currentTime") < start + 1.75
+
+
+@pytest.mark.parametrize("mode", ["original", "processed"])
 def test_click_video_toggles_playback_with_selected_audio(page, viewer_result, tmp_path, mode):
     load(page, viewer_result, tmp_path)
     page.locator("#audio-mode").select_option(mode)

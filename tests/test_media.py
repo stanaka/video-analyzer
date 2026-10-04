@@ -4,6 +4,7 @@ import av
 import numpy as np
 import pytest
 
+from video_analyzer.errors import AnalysisError
 from video_analyzer.media import detect_scenes, extract_audio, extract_frames, probe, windows
 from video_analyzer.schema import Scene
 
@@ -22,6 +23,43 @@ def test_cuts_and_frame_sampling(video, tmp_path):
         paths, pts = extract_frames(media, targets, tmp_path / scene.id, 768)
         assert paths
         assert all(start <= time < end for time in pts)
+
+
+def test_partial_scene_boundaries_and_frame_bounds(video, tmp_path):
+    media = probe(video)
+    scenes = detect_scenes(media, 3, 0.5, start_time=1.05, end_time=2.55)
+    assert [(scene.start, scene.end) for scene in scenes] == [(1.05, 2), (2, 2.55)]
+    _, pts = extract_frames(
+        media, [1.06, 1.5, 2.54], tmp_path / "frames", 768, start_time=1.05, end_time=2.55
+    )
+    assert all(1.05 <= timestamp < 2.55 for timestamp in pts)
+    with pytest.raises(AnalysisError, match="no decodable video frames"):
+        detect_scenes(media, 3, 0.5, start_time=1.01, end_time=1.02)
+    with pytest.raises(AnalysisError, match="No frames"):
+        extract_frames(media, [1.015], tmp_path / "empty", 768, start_time=1.01, end_time=1.02)
+
+
+def test_partial_scene_detection_with_nonzero_video_start(tmp_path, ffmpeg):
+    path = tmp_path / "offset.mp4"
+    ffmpeg(
+        "-itsoffset",
+        "1",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:s=160x120:r=10:d=4",
+        "-c:v",
+        "libx264",
+        path,
+    )
+    media = probe(path)
+    assert media.video_start == 1
+    scenes = detect_scenes(media, 3, 0.5, start_time=1.05, end_time=2.55)
+    assert [(scene.start, scene.end) for scene in scenes] == [(1.05, 2.55)]
+    _, pts = extract_frames(
+        media, [1.06, 2.54], tmp_path / "frames", 768, start_time=1.05, end_time=2.55
+    )
+    assert all(1.05 <= timestamp < 2.55 for timestamp in pts)
 
 
 @pytest.mark.parametrize("normalization", ["off", "peak", "dynamic"])
@@ -87,6 +125,9 @@ def test_vfr_cuts_use_presentation_times(tmp_path, ffmpeg):
     scenes = detect_scenes(probe(path), 3, 0.5)
     assert len(scenes) == 2
     assert scenes[1].start == pytest.approx(pts[20], abs=0.01)
+    selected = detect_scenes(probe(path), 3, 0.5, start_time=1, end_time=3.5)
+    assert selected[0].start == 1 and selected[-1].end == 3.5
+    assert len(selected) == 2 and selected[1].start == pytest.approx(pts[20], abs=0.01)
 
 
 def test_long_scene_windows_preserve_boundaries():

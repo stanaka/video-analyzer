@@ -4,6 +4,10 @@
   const $ = id => document.getElementById(id);
   const settings = result.provenance.configuration || {};
   const duration = result.media.duration;
+  const analysisRange = result.provenance.analysis_range || {start: 0, end: duration};
+  const rangeStart = analysisRange.start;
+  const rangeEnd = analysisRange.end;
+  const rangeDuration = rangeEnd - rangeStart;
   const ja = result.report_language === "ja";
   const messages = {
     play: ["Play", "再生"], pause: ["Pause", "一時停止"], mute: ["Mute", "消音"],
@@ -97,6 +101,10 @@
   $("title").textContent = result.media.path.split(/[\\/]/).pop();
   $("summary").textContent = time(duration) + " · " + result.media.width + " × " +
     result.media.height + " · " + result.speakers.length + (ja ? " 話者" : " speakers");
+  if (result.provenance.analysis_range) {
+    $("summary").textContent += " · " + (ja ? "解析範囲 " : "Analysis range ") +
+      time(rangeStart) + " – " + time(rangeEnd);
+  }
   $("metadata").textContent = JSON.stringify({
     media: result.media, application_version: result.application_version,
     schema_version: result.schema_version, provenance: result.provenance
@@ -130,13 +138,14 @@
   }
   const selectedAudio = () => audioSources.get(audioMode.value) || null;
   const videoStart = Math.max(0, playback.video_start);
-  const currentTime = () => clamp(video.currentTime - videoStart, 0, duration);
+  const audioStart = playback.audio_start || 0;
+  const currentTime = () => clamp(video.currentTime - videoStart, rangeStart, rangeEnd);
   let wantsPlayback = false;
   let generation = 0;
   let starting = null;
   let muted = false;
   let frame = null;
-  let pendingTime = 0;
+  let pendingTime = rangeStart;
   let objectUrl = null;
   let lastCorrection = 0;
   let timelineWidth = 1;
@@ -175,11 +184,11 @@
   }
   function updatePosition() {
     const position = currentTime();
-    $("clock").textContent = time(position) + " / " + time(duration);
+    $("clock").textContent = time(position) + " / " + time(rangeEnd);
     $("seek").value = String(position);
     $("seek").setAttribute("aria-valuetext", time(position));
     $("play").textContent = tr(wantsPlayback ? "pause" : "play");
-    $("playhead").style.left = (labelWidth + position / duration * timelineWidth) + "px";
+    $("playhead").style.left = (labelWidth + (position - rangeStart) / rangeDuration * timelineWidth) + "px";
     const next = new Set(lookupActive(position, position).map(item => item.node));
     activeNodes.forEach(node => { if (!next.has(node)) node.classList.remove("active"); });
     next.forEach(node => { if (!activeNodes.has(node)) node.classList.add("active"); });
@@ -201,16 +210,17 @@
   function alignAudio(position = currentTime()) {
     const audio = selectedAudio();
     if (audio && audio.readyState >= 1) {
-      audio.currentTime = clamp(position, 0, Number.isFinite(audio.duration) ? audio.duration : duration);
+      audio.currentTime = clamp(position - audioStart, 0,
+        Number.isFinite(audio.duration) ? audio.duration : rangeDuration);
     }
   }
   function tick() {
     frame = null;
     if (!wantsPlayback) return;
-    if (currentTime() >= duration - 0.001) { pause(); return; }
+    if (currentTime() >= rangeEnd - 0.001) { seekTo(rangeEnd, false); return; }
     const audio = selectedAudio();
     if (audio && !audio.paused && !video.paused && !video.seeking && !audio.seeking &&
-      Math.abs(audio.currentTime - currentTime()) > 0.1 && performance.now() - lastCorrection > 250) {
+      Math.abs(audio.currentTime + audioStart - currentTime()) > 0.1 && performance.now() - lastCorrection > 250) {
       lastCorrection = performance.now();
       alignAudio();
     }
@@ -242,7 +252,7 @@
     starting = null;
     stopMedia();
     wantsPlayback = playAfter;
-    pendingTime = clamp(position, 0, duration);
+    pendingTime = clamp(position, rangeStart, rangeEnd);
     if (video.readyState >= 1) video.currentTime = pendingTime + videoStart;
     alignAudio(pendingTime);
     $("media-error").hidden = true;
@@ -263,9 +273,10 @@
   }
   function togglePlayback() {
     if (wantsPlayback) pause();
-    else seekTo(currentTime() >= duration - 0.01 ? 0 : currentTime(), true);
+    else seekTo(currentTime() >= rangeEnd - 0.01 ? rangeStart : currentTime(), true);
   }
-  $("seek").max = String(duration);
+  $("seek").min = String(rangeStart);
+  $("seek").max = String(rangeEnd);
   $("seek").addEventListener("input", () => seekTo(Number($("seek").value)));
   $("play").addEventListener("click", togglePlayback);
   video.addEventListener("click", togglePlayback);
@@ -295,7 +306,12 @@
   });
   video.addEventListener("error", () => fail(tr("videoError")));
   video.addEventListener("ended", pause);
-  video.addEventListener("timeupdate", updatePosition);
+  video.addEventListener("timeupdate", () => {
+    const position = video.currentTime - videoStart;
+    if (video.readyState >= 1 && (position < rangeStart || position > rangeEnd)) {
+      seekTo(clamp(position, rangeStart, rangeEnd), position < rangeStart && wantsPlayback);
+    } else updatePosition();
+  });
   for (const media of [video, ...audioSources.values()]) {
     media.addEventListener("pause", () => {
       const expected = expectedPauses.get(media) || 0;
@@ -378,11 +394,11 @@
     return body;
   }
   function addBlock(body, span, scene = false, text = "") {
-    const start = clamp(span.start, 0, duration), end = clamp(span.end, start, duration);
+    const start = clamp(span.start, rangeStart, rangeEnd), end = clamp(span.end, start, rangeEnd);
     const block = element("button", scene ? "scene-marker" : "turn", text);
     block.type = "button";
-    block.style.left = (start / duration * 100) + "%";
-    block.style.width = ((end - start) / duration * 100) + "%";
+    block.style.left = ((start - rangeStart) / rangeDuration * 100) + "%";
+    block.style.width = ((end - start) / rangeDuration * 100) + "%";
     block.setAttribute("aria-label", (scene ? tr("scenes") : speakerName(span.speaker_id)) +
       " " + time(start) + " – " + time(end));
     blockData.set(block, span);
@@ -418,7 +434,8 @@
     const body = event.target.closest(".track-body, .ruler");
     if (!body) return null;
     const rect = body.getBoundingClientRect();
-    return clamp((event.clientX - rect.left) / rect.width * duration, 0, duration);
+    return clamp(rangeStart + (event.clientX - rect.left) / rect.width * rangeDuration,
+      rangeStart, rangeEnd);
   }
   function hideTooltip() { $("tooltip").hidden = true; }
   function showTooltip(span, position, x, y) {
@@ -476,13 +493,14 @@
     timelineWidth = viewport * Number($("zoom").value);
     $("timeline").style.width = (timelineWidth + labelWidth) + "px";
     $("ruler").replaceChildren();
-    const rawStep = duration / Math.max(1, timelineWidth / 100);
+    const rawStep = rangeDuration / Math.max(1, timelineWidth / 100);
     const magnitude = 10 ** Math.floor(Math.log10(rawStep));
     const step = [1, 2, 5, 10].map(value => value * magnitude).find(value => value >= rawStep);
     const ticks = document.createDocumentFragment();
-    for (let position = 0; position < duration; position += step) {
+    for (let index = 0; index * step < rangeDuration; index++) {
+      const position = rangeStart + index * step;
       const tick = element("span", "tick", time(position).replace(/\.000$/, ""));
-      tick.style.left = (position / duration * 100) + "%";
+      tick.style.left = ((position - rangeStart) / rangeDuration * 100) + "%";
       ticks.append(tick);
     }
     $("ruler").append(ticks);

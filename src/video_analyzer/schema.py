@@ -1,7 +1,8 @@
+import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .diarization import NEMO_DIARIZERS
 
@@ -30,6 +31,8 @@ class PyannoteConfig(Record):
 
 
 class AnalysisConfig(Record):
+    start_time: float = Field(default=0.0, ge=0)
+    end_time: float | None = Field(default=None, gt=0)
     transcription: bool = True
     diarization: bool = True
     scene_description: bool = True
@@ -59,6 +62,30 @@ class AnalysisConfig(Record):
     frame_long_edge: int = Field(default=768, ge=64, le=768)
     max_new_tokens: int = Field(default=448, ge=32, le=2048)
     worker_timeout: float = Field(default=3600, gt=0)
+
+    @field_validator("start_time", "end_time", mode="before")
+    @classmethod
+    def parse_time(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("time must be seconds or MM:SS / HH:MM:SS")
+        if isinstance(value, str) and ":" in value:
+            parts = value.strip().split(":")
+            if (
+                len(parts) not in (2, 3)
+                or any(not re.fullmatch(r"[0-9]+", part) for part in parts[:-1])
+                or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", parts[-1])
+                or float(parts[-1]) >= 60
+                or (len(parts) == 3 and int(parts[1]) >= 60)
+            ):
+                raise ValueError("time must be MM:SS or HH:MM:SS with seconds/minutes below 60")
+            value = sum(float(part) * 60**index for index, part in enumerate(reversed(parts)))
+        return value
+
+    @model_validator(mode="after")
+    def ordered_analysis_range(self):
+        if self.end_time is not None and self.end_time <= self.start_time:
+            raise ValueError("end_time must be greater than start_time")
+        return self
 
     @model_validator(mode="after")
     def supported_diarization_settings(self):
