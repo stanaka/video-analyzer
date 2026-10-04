@@ -73,6 +73,74 @@ def assert_sync(page, offset=1):
     )
 
 
+@pytest.mark.parametrize("mode", ["original", "processed"])
+def test_click_video_toggles_playback_with_selected_audio(page, viewer_result, tmp_path, mode):
+    load(page, viewer_result, tmp_path)
+    page.locator("#audio-mode").select_option(mode)
+    page.locator("#video").click()
+    assert_sync(page)
+    assert page.locator("#play").inner_text() == "Pause"
+    # Toolbar controls must not bubble into the video click action.
+    page.locator("#mute").click()
+    assert_sync(page)
+    page.locator("#video").click()
+    assert page.locator("#play").inner_text() == "Play"
+    assert page.locator("#video").evaluate("v => v.paused")
+    assert page.locator("#" + mode + "-audio").evaluate("a => a.paused")
+    position = page.locator("#video").evaluate("v => v.currentTime")
+    page.locator("#video").click()
+    assert_sync(page)
+    assert page.locator("#video").evaluate("v => v.currentTime") >= position
+
+
+def test_timeline_click_scrolls_transcript_to_matching_passage(page, viewer_result, tmp_path):
+    viewer_result.transcript = [
+        TranscriptUnit(
+            id=f"t{index}",
+            start=index / 4,
+            end=index / 4 + 0.125,
+            text=f"Passage {index}",
+            speaker_id=f"speaker_{index % 2 + 1:02d}",
+        )
+        for index in range(40)
+    ]
+    # This other speaker's passage also contains the clicked time, but the
+    # clicked speaker's passage should be centered in the transcript pane.
+    viewer_result.transcript.append(
+        TranscriptUnit(
+            id="overlap", start=3.9, end=4.2, text="Overlapping speech", speaker_id="speaker_02"
+        )
+    )
+    load(page, viewer_result, tmp_path)
+    assert page.locator("#transcript").evaluate("p => p.scrollHeight > p.clientHeight")
+    slider(page, "#zoom", 4)
+    page.locator("#timeline-scroll").evaluate("el => el.scrollLeft = 900")
+    lane = page.locator(".track-body").nth(1).bounding_box()
+    page_y = page.evaluate("scrollY")
+    page.mouse.click(lane["x"] + lane["width"] * 4.05 / 12, lane["y"] + 22)
+    assert_sync(page)
+    row = page.locator(".transcript-entry").filter(has=page.get_by_text("Passage 16", exact=True))
+    pane_rect = page.locator("#transcript").bounding_box()
+    row_rect = row.bounding_box()
+    assert row_rect["y"] + row_rect["height"] / 2 == pytest.approx(
+        pane_rect["y"] + pane_rect["height"] / 2, abs=2
+    )
+    assert page.locator("#transcript").evaluate("p => p.scrollTop") > 0
+    assert page.evaluate("scrollY") == page_y
+    page.locator("#play").click()
+
+    page.locator("#fit").click()
+    ruler = page.locator("#ruler").bounding_box()
+    for position, text in [(5.2, "Passage 21"), (11, "Passage 39"), (0.05, "Passage 0")]:
+        page.mouse.click(ruler["x"] + ruler["width"] * position / 12, ruler["y"] + 10)
+        assert_sync(page)
+        row = page.locator(".transcript-entry").filter(has=page.get_by_text(text, exact=True))
+        row_rect = row.bounding_box()
+        assert row_rect["y"] >= pane_rect["y"] - 1
+        assert row_rect["y"] + row_rect["height"] <= pane_rect["y"] + pane_rect["height"] + 1
+        page.locator("#play").click()
+
+
 def test_hover_overlap_seek_zoom_and_keyboard(page, viewer_result, tmp_path):
     viewer_result.transcript.append(
         TranscriptUnit(id="next", start=5.5, end=6, text="Following turn", speaker_id="speaker_01")
@@ -249,6 +317,7 @@ def test_silent_video_without_audio(page, video, tmp_path):
     assert page.locator("#audio-mode").is_disabled()
     assert page.locator("#volume").is_disabled()
     assert "disabled" in page.locator("#transcript").inner_text()
-    page.locator("#play").click()
+    # Timeline navigation also works when there are no transcript rows to scroll.
+    page.locator(".scene-marker").click()
     page.wait_for_function("document.querySelector('#video').currentTime > .2")
     assert page.locator("#media-error").is_hidden()

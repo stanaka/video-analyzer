@@ -261,12 +261,14 @@
     stopMedia();
     readyToResume();
   }
-  $("seek").max = String(duration);
-  $("seek").addEventListener("input", () => seekTo(Number($("seek").value)));
-  $("play").addEventListener("click", () => {
+  function togglePlayback() {
     if (wantsPlayback) pause();
     else seekTo(currentTime() >= duration - 0.01 ? 0 : currentTime(), true);
-  });
+  }
+  $("seek").max = String(duration);
+  $("seek").addEventListener("input", () => seekTo(Number($("seek").value)));
+  $("play").addEventListener("click", togglePlayback);
+  video.addEventListener("click", togglePlayback);
   $("mute").addEventListener("click", () => { muted = !muted; routeAudio(); });
   $("volume").addEventListener("input", routeAudio);
   $("speed").addEventListener("change", routeAudio);
@@ -360,7 +362,10 @@
   }
   const speechLookup = new Map([...unitsBySpeaker].map(([key, values]) => [key, intervalIndex(values)]));
   const blockData = new WeakMap();
+  const trackSpeakers = new WeakMap();
   const activeItems = [];
+  const transcriptEntries = [];
+  let lookupTranscript = () => [];
   function addTrack(name, color, scene = false) {
     const track = element("div", "track" + (scene ? " scene-track" : ""));
     track.style.setProperty("--speaker-color", color || "#8496a5");
@@ -396,11 +401,13 @@
   }
   for (const speaker of speakers) {
     const body = addTrack(speaker, colors.get(speaker));
+    trackSpeakers.set(body, speaker);
     result.diarization.filter(turn => turn.speaker_id === speaker).forEach(turn => addBlock(body, turn));
   }
   const neutralUnits = settings.diarization === false ? units : units.filter(unit => !unit.speaker_id);
   if (neutralUnits.length) {
     const body = addTrack(settings.diarization === false ? tr("transcript") : tr("unknown"));
+    trackSpeakers.set(body, null);
     neutralUnits.forEach(unit => addBlock(body, {...unit, speaker_id: null}));
   }
   if (settings.diarization === false || !result.diarization.length) {
@@ -434,10 +441,24 @@
   });
   $("timeline").addEventListener("pointerleave", hideTooltip);
   $("timeline-scroll").addEventListener("scroll", hideTooltip);
+  function scrollTranscript(position, speaker) {
+    const matches = lookupTranscript(position, position);
+    const entry = (speaker !== undefined && matches.find(item => item.speaker_id === speaker)) ||
+      matches[0] || transcriptEntries.find(item => item.start >= position) || transcriptEntries.at(-1);
+    if (!entry) return;
+    const pane = $("transcript");
+    const row = entry.node.getBoundingClientRect();
+    // Scroll only the transcript pane, keeping the player and timeline in place.
+    pane.scrollTop += row.top - pane.getBoundingClientRect().top - pane.clientTop -
+      (pane.clientHeight - row.height) / 2;
+  }
   $("timeline").addEventListener("click", event => {
     const block = event.target.closest(".turn, .scene-marker");
     const position = event.detail === 0 && block ? blockData.get(block).start : positionAt(event);
-    if (position !== null) seekTo(position, true);
+    if (position !== null) {
+      seekTo(position, true);
+      scrollTranscript(position, trackSpeakers.get(event.target.closest(".track-body")));
+    }
   });
   $("timeline-scroll").addEventListener("keydown", event => {
     if (event.target !== $("timeline-scroll")) return;
@@ -446,7 +467,7 @@
       seekTo(currentTime() + (event.key === "ArrowRight" ? 5 : -5));
     } else if (event.key === " ") {
       event.preventDefault();
-      $("play").click();
+      togglePlayback();
     }
   });
   function layoutTimeline() {
@@ -502,7 +523,9 @@
     row.append(meta, element("span", "entry-text", joinText(group.units)));
     row.addEventListener("click", () => seekTo(group.start, true));
     $("transcript").append(row);
-    activeItems.push({...group, node: row});
+    const entry = {...group, node: row};
+    transcriptEntries.push(entry);
+    activeItems.push(entry);
   }
   result.scenes.forEach((scene, index) => {
     const row = element("div", "scene-entry");
@@ -526,6 +549,7 @@
   if (settings.scene_description === false) $("scenes").prepend(element("p", "empty", tr("noDescription")));
   if (!result.scenes.length) $("scenes").append(element("p", "empty", tr("noScenes")));
   lookupActive = intervalIndex(activeItems);
+  lookupTranscript = intervalIndex(transcriptEntries);
   routeAudio();
   layoutTimeline();
   video.src = playback.video;

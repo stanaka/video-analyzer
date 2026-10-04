@@ -225,15 +225,26 @@ mise run analyze --help
 With the virtual environment activated, use `video-analyzer --help` for the
 command list, or `video-analyzer COMMAND --help` for the same command-specific help.
 
-The default output is `input.analysis.md` beside the video,
-`input.analysis.json` with `--format json`, or `input.analysis.html` with
-`--format html`. Progress goes to stderr; stdout
-contains the completed report path. Final reports are written atomically only
-after all stages succeed. Existing reports are preserved on failure.
+Analysis always saves a JSON result. The default produces `input.analysis.json`
+and `input.analysis.md` beside the video. `--format html` produces
+`input.analysis.json` and `input.analysis.html`; `--format json` writes only
+`input.analysis.json`.
+
+`-o` sets the selected report's path. For Markdown or HTML, the JSON file is saved
+beside that report with its extension replaced by `.json`: for example,
+`--format html -o reports/review.html` also writes `reports/review.json`. A
+Markdown/HTML output path must not end in `.json` or refer to its JSON companion.
+Progress and the companion JSON path go to stderr; stdout contains only the
+completed selected report path.
+
+Files are written atomically after analysis succeeds. An analysis failure
+preserves existing outputs. JSON is saved before Markdown/HTML generation, so a
+later export failure preserves the completed analysis for reuse while leaving an
+existing selected report intact.
 
 | Option | Default | Behavior |
 | --- | --- | --- |
-| `--format` | `markdown` | `markdown`, `json`, or an interactive `html` report |
+| `--format` | `markdown` | `markdown`, `json`, or an interactive `html` report; JSON is always saved |
 | `--config` | none | Load YAML analysis settings; explicit CLI options override individual settings |
 | `--show-settings` | disabled | Print all merged analysis settings as YAML to stderr before starting analysis |
 | `--resume` / `--no-resume` | disabled | Reuse matching checkpoints, or disable reuse even when enabled in YAML |
@@ -400,8 +411,8 @@ and diarization are disabled. Changing either uses a separate checkpoint directo
 
 ### Interactive HTML viewer
 
-Create an HTML report during analysis, or export an existing JSON result without
-loading models or rerunning inference:
+Create an HTML report and its JSON result during analysis, or export a saved JSON
+result without loading models or rerunning inference:
 
 ```bash
 mise run analyze input.mp4 --format html --audio-normalization dynamic --noise-reduction
@@ -420,8 +431,11 @@ recorded input hash when available and otherwise checks media metadata.
 
 The timeline shows one colored lane per speaker and retains overlapping speech.
 Hover over a speech block for that speaker's transcript within five seconds of
-the pointer time, clipped to the block. Click anywhere in a timeline lane or its
-ruler to seek and play; transcript and scene entries also jump to their timestamps.
+the pointer time, clipped to the block. Click the video itself to play or pause.
+Click anywhere in a timeline lane or its ruler to seek, play, and scroll the
+transcript pane to the matching passage. Overlapping speech prefers the clicked
+speaker's passage; a click in a silent gap shows the next passage, or the last
+passage after speech ends. Transcript and scene entries also jump to their timestamps.
 Use **Zoom** and horizontal scrolling for detail, or **Fit** for the full recording.
 Focused speech blocks support Enter, and the focused timeline supports Space to
 play/pause and arrow keys to seek five seconds. The player controls are keyboard

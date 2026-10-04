@@ -109,8 +109,8 @@ def parser(*, sparse=False):
         "analyze",
         help="Analyze one local MP4",
         description="Transcribe speech, identify speakers, detect scenes, and describe one local MP4\n"
-        "using prepared models offline. Progress goes to stderr; stdout prints the\n"
-        "report path.",
+        "using prepared models offline. Always save JSON, plus the selected report format.\n"
+        "Progress goes to stderr; stdout prints the selected report path.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
         "  video-analyzer analyze input.mp4\n"
@@ -155,13 +155,13 @@ def parser(*, sparse=False):
         "--format",
         choices=("markdown", "json", "html"),
         default="markdown",
-        help="Report output format (default: %(default)s)",
+        help="Selected report format; a JSON result is always saved (default: %(default)s)",
     )
     analyze.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="Report path; defaults to INPUT.analysis.md, .json, or .html beside the video",
+        help="Selected report path; defaults to INPUT.analysis.md, .json, or .html beside the video. Markdown/HTML also save a sibling .json file",
     )
     analyze.add_argument(
         "--asr",
@@ -420,8 +420,16 @@ def main(argv=None) -> int:
             args.format
         ]
         output = args.output or args.input.with_suffix(suffix)
-        if output.resolve() == args.input.resolve():
+        json_output = output if args.format == "json" else output.with_suffix(".json")
+        if args.input.resolve() in {output.resolve(), json_output.resolve()}:
             raise AnalysisError("Output must not overwrite the input video")
+        if args.format != "json" and (
+            output.suffix.lower() == ".json" or output.resolve() == json_output.resolve()
+        ):
+            raise AnalysisError(
+                "The selected report and JSON result need different paths. "
+                "Use --format json for JSON output, or choose a non-.json report path."
+            )
         if args.show_settings:
             print(
                 "# Analysis settings\n"
@@ -437,12 +445,15 @@ def main(argv=None) -> int:
                 flush=True,
             )
         result = analyze_video(args.input, config)
+        # Save the completed analysis before presentation work, so export failures
+        # can be retried without rerunning inference.
+        atomic_text(json_output, render_json(result))
+        if args.format != "json":
+            print(f"JSON result saved to {json_output.resolve()}", file=sys.stderr, flush=True)
         if args.format == "html":
             write_html(result, output)
-        else:
-            atomic_text(
-                output, render_json(result) if args.format == "json" else render_markdown(result)
-            )
+        elif args.format == "markdown":
+            atomic_text(output, render_markdown(result))
         print(str(output.resolve()))
         return 0
     except (AnalysisError, ValidationError, OSError) as exc:
