@@ -13,6 +13,7 @@ class AnalysisConfig(Record):
     diarization: bool = True
     scene_description: bool = True
     asr: Literal["whisper", "qwen"] = "whisper"
+    diarization_backend: Literal["pyannote", "sortformer"] = "pyannote"
     profile: Literal["auto", "mac", "cuda", "cpu"] = "auto"
     model_dir: Path = Path(".models")
     runtime_dir: Path = Path(".runtime")
@@ -34,6 +35,19 @@ class AnalysisConfig(Record):
     frame_long_edge: int = Field(default=768, ge=64, le=768)
     max_new_tokens: int = Field(default=448, ge=32, le=2048)
     worker_timeout: float = Field(default=3600, gt=0)
+
+    @model_validator(mode="after")
+    def supported_speaker_count(self):
+        if (
+            self.diarization
+            and self.diarization_backend == "sortformer"
+            and self.num_speakers is not None
+        ):
+            raise ValueError(
+                "Sortformer estimates its own speaker count (up to four speakers). "
+                "Omit --num-speakers / num_speakers or select the pyannote backend."
+            )
+        return self
 
 
 class Span(Record):

@@ -13,9 +13,12 @@ MODEL_REPOS = {
     "qwen": "Qwen/Qwen3-ASR-1.7B",
     "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
     "diarization": "pyannote/speaker-diarization-community-1",
+    "sortformer": "nvidia/diar_streaming_sortformer_4spk-v2.1",
     "molmo-mlx": "mlx-community/Molmo2-8B-4bit",
     "molmo-torch": "allenai/Molmo2-8B",
 }
+SORTFORMER_CHECKPOINT = "diar_streaming_sortformer_4spk-v2.1.nemo"
+DIARIZATION_MODELS = {"pyannote": "diarization", "sortformer": "sortformer"}
 PATTERNS = [
     "*.json",
     "*.yaml",
@@ -44,11 +47,16 @@ def required_models(
     audio=True,
     transcription=True,
     diarization=True,
+    diarization_backend="pyannote",
     scene_description=True,
 ) -> list[str]:
     result = ["molmo-mlx" if profile == "mac" else "molmo-torch"] if scene_description else []
     if audio and diarization:
-        result.append("diarization")
+        result.extend(
+            DIARIZATION_MODELS.values()
+            if diarization_backend == "both"
+            else [DIARIZATION_MODELS[diarization_backend]]
+        )
     if audio and transcription:
         if asr in ("whisper", "both"):
             result += ["whisper"]
@@ -57,7 +65,9 @@ def required_models(
     return result
 
 
-def prepare_models(root: Path, profile: str, asr: str, progress=print) -> dict:
+def prepare_models(
+    root: Path, profile: str, asr: str, progress=print, *, diarization_backend="pyannote"
+) -> dict:
     """The only application path allowed to contact the Hugging Face Hub.
 
     hf uses its saved login (or HF_TOKEN). Tokens are never command arguments or
@@ -76,7 +86,9 @@ def prepare_models(root: Path, profile: str, asr: str, progress=print) -> dict:
     manifest = (
         read_json(manifest_path) if manifest_path.exists() else {"schema_version": 1, "models": {}}
     )
-    for key in required_models(resolve_profile(profile), asr):
+    for key in required_models(
+        resolve_profile(profile), asr, diarization_backend=diarization_backend
+    ):
         repo = MODEL_REPOS[key]
         progress(f"Preparing {repo}")
         try:
@@ -84,6 +96,8 @@ def prepare_models(root: Path, profile: str, asr: str, progress=print) -> dict:
             patterns = PATTERNS + (
                 ["*.bin", "*.npz", "*.pt", "*.ckpt"] if key == "diarization" else []
             )
+            if key == "sortformer":
+                patterns = [SORTFORMER_CHECKPOINT, "README.md"]
             expected = [
                 s
                 for s in info.siblings
@@ -93,6 +107,8 @@ def prepare_models(root: Path, profile: str, asr: str, progress=print) -> dict:
             ]
             if not expected:
                 raise AnalysisError(f"No model files found for {repo}")
+            if key == "sortformer" and SORTFORMER_CHECKPOINT not in {s.rfilename for s in expected}:
+                raise AnalysisError(f"Missing {SORTFORMER_CHECKPOINT} in {repo}")
             # On updates use a fresh directory. Existing checkpoints can still resolve
             # their old snapshot and an interrupted download cannot corrupt it.
             previous = manifest["models"].get(key)
@@ -122,11 +138,11 @@ def prepare_models(root: Path, profile: str, asr: str, progress=print) -> dict:
             )
         except GatedRepoError as exc:
             raise AnalysisError(
-                "Accept access at https://huggingface.co/pyannote/speaker-diarization-community-1 and run `hf auth login` with a read token."
+                f"Accept access at https://huggingface.co/{repo} and run `hf auth login` with a read token."
             ) from exc
         except (HfHubHTTPError, subprocess.CalledProcessError) as exc:
             raise AnalysisError(
-                f"Cannot prepare {repo}. Check network access and `hf auth whoami`; for pyannote, accept its model conditions first."
+                f"Cannot prepare {repo}. Check network access and model access permissions."
             ) from exc
         files = {}
         for entry in expected:
@@ -149,7 +165,8 @@ def local_models(root: Path, required: list[str], *, verify_hashes=False) -> dic
     root = root.resolve()
     if not (root / "manifest.json").is_file():
         raise AnalysisError(
-            f"Missing {root / 'manifest.json'}. Run video-analyzer prepare-models first."
+            f"Missing {root / 'manifest.json'} for models: {', '.join(required)}. "
+            "Run video-analyzer prepare-models with the selected --diarization-backend first."
         )
     manifest = read_json(root / "manifest.json")
     if manifest.get("schema_version") != 1:
@@ -159,7 +176,17 @@ def local_models(root: Path, required: list[str], *, verify_hashes=False) -> dic
         entry = manifest.get("models", {}).get(key)
         if not entry or not entry.get("files"):
             raise AnalysisError(
-                f"Model {key} is not prepared. Run prepare-models with the requested ASR/profile."
+                f"Model {key} is not prepared. Run prepare-models with the requested ASR/profile "
+                "and --diarization-backend."
+            )
+        if key == "sortformer" and (
+            entry.get("repo_id") != MODEL_REPOS[key]
+            or SORTFORMER_CHECKPOINT not in entry["files"]
+            or entry["files"][SORTFORMER_CHECKPOINT].get("size", 0) <= 0
+        ):
+            raise AnalysisError(
+                f"Sortformer requires the NVIDIA v2.1 checkpoint {SORTFORMER_CHECKPOINT}. "
+                "Run prepare-models --diarization-backend sortformer."
             )
         directory = (root / entry["path"]).resolve()
         if not directory.is_relative_to(root):

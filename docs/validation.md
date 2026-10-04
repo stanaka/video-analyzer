@@ -154,3 +154,110 @@ container or network namespace suitable for the installed NVIDIA runtime.
 The ignored `.validation` directory in this working copy contains the generated
 fixture, raw reports, logs, and checkpoint measurements from this session. Test
 fixtures and model weights are not included in the package.
+
+## Sortformer v2.1 setup and validation (2026-10-04)
+
+The optional reference runtime was installed on the same Apple M2 Mac using
+`mise run setup:sortformer`: Python 3.12.15, NeMo 2.7.3, and
+PyTorch/torchaudio 2.8.0. The CLI and existing workers still use Python 3.11.15.
+Separate dependency resolutions and SHA-256 locks were generated for macOS arm64
+and Linux x86_64. Linux installation, CPU inference, and CUDA inference were not
+executed; no Linux/NVIDIA host was available.
+
+`prepare-models --profile mac --diarization-backend sortformer` downloaded the
+original NVIDIA checkpoint while preserving the pyannote, Whisper, Qwen, aligner,
+and Molmo2 manifest entries. The checkpoint is 471,367,680 bytes, from immutable
+revision `cd03eee90fbec18297ac31b8c21546e596b7f71c`, with SHA-256
+`8abd32832159c6ac1148c926b7276f35ba34582c444e559dce1f1253fea42ef8`.
+It is the pretrained v2.1 model, not a Japanese fine-tuned checkpoint.
+
+Offline `doctor --profile mac --asr both --diarization-backend both --verify-hashes`
+passed with all three worker environments and all six model entries. The NeMo
+class was imported inside the Sortformer worker with both the application's
+Python socket guard and the macOS network sandbox active. NeMo warns that the
+configured cache update period 300 has an effective period of 340 with the
+recording preset's chunk length; both values are recorded in provenance.
+
+`mise run check` passed **357 normal tests**, including lint and formatting.
+Coverage includes both diarizers with both ASRs across Mac, CPU, and CUDA profile
+routing; preparation coexistence and backend-specific errors; missing/ancillary-only
+checkpoints; silence, overlap, ties, partial frames, and speech-union preservation;
+streaming-state continuity and progress cleanup; and resume/cache isolation.
+These profile-routing tests use model doubles and do not establish CUDA hardware
+support. `UV_OFFLINE=1 mise run build` built the wheel and source distribution;
+both contain the Sortformer worker and exclude local models, runtimes, and caches.
+All setup scripts passed shell syntax checks.
+
+Five real-model tests also passed under OS network denial: the four combinations
+of pyannote/Sortformer and Whisper/Qwen, and a Sortformer edge-case test. Each
+pipeline completed Japanese/English transcription, speaker assignment, and Molmo2
+visual descriptions, detected two speakers, and then resumed with a worker factory
+that raises if invoked. Each used a separate empty `HF_HOME`, without a token;
+none populated a general Hub weight cache. The input was the same 16.3-second
+Japanese/English fixture described above. This confirms integration, not an
+accuracy improvement.
+
+The Sortformer edge-case test reused one loaded worker for empty audio, 10 ms of
+silence, one second of silence, and 65 seconds of repeated fixture audio. Empty
+and silent inputs produced empty timelines. The long input completed three
+streaming steps, emitted progress through the worker protocol, and produced
+bounded, nonoverlapping exclusive turns. The tiny input was padded internally
+for NeMo's STFT, with output timestamps clamped to its original duration.
+
+To reproduce these five checks after preparing both diarizers and ASR backends:
+
+```bash
+/usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+  /usr/bin/env VIDEO_ANALYZER_MODEL_TEST_VIDEO=/absolute/path/fixture.mp4 \
+  VIDEO_ANALYZER_TEST_DIARIZATION=both \
+  .venv/bin/pytest -m models -k 'real_offline_pipeline or real_sortformer' -v -s
+```
+
+On an NVIDIA host, also set `VIDEO_ANALYZER_TEST_PROFILE=cuda` and use the Linux
+network-isolation procedure described above. The opt-in tests select that
+profile's CUDA device, while Sortformer uses CPU for the Mac profile.
+
+### Japanese recording comparison
+
+At the user's request, this comparison used generated Japanese speech. macOS
+`say` synthesized one passage with **Kyoko** and another with **Eddy (Japanese
+(Japan))**, at rate 160. Each passage was repeated four times in alternating
+order, with 0.8 seconds of digital silence inserted before every clip. The
+result is **109.28075 seconds**, 16 kHz mono PCM, with no intentional overlap.
+Its SHA-256 is
+`59e2843310997bcc0728a18cba9ab6c3732dc48648c09aa550e919f56e755a55`.
+Normalization and denoising were off. The passages were:
+
+- Kyoko: 「今日は、動画の話者を区別する仕組みについて話します。音声の処理はすべてこのコンピューターで実行します。次の発表者に交代します。」
+- Eddy: 「ありがとうございます。私は、長い録音の中でも同じ話者を識別できるか確認します。ネットワークに接続しなくても分析できることが大切です。」
+
+Both diarizers consumed the identical audio on the Mac CPU, in separate fresh
+workers with automatic speaker counts. They ran sequentially, without ASR or
+vision inference alongside them, with empty Hugging Face homes, no token, and
+OS networking blocked. Sortformer completed **five streaming steps** using the
+recording preset and retained speaker state across them.
+
+| Measurement | pyannote Community-1 | Sortformer v2.1 |
+| --- | ---: | ---: |
+| Diarization inference, excluding startup/load | 69.79 s | 2.86 s |
+| Worker startup, load, inference, and shutdown | 75.21 s | 8.20 s |
+| Peak process RSS | 4.95 GiB | 2.03 GiB |
+| Detected speakers | 2 | 2 |
+| Regular / exclusive turns | 20 / 20 | 16 / 16 |
+
+Each voice retained one consistent speaker ID in all four occurrences, with no
+observed interchange between the two voices inside the source clips. Both
+models extended some speech onsets into the known inserted silence: approximately
+**0.185 seconds total for pyannote** and **0.036 seconds for Sortformer**. These
+are boundary observations from the generated fixture, not DER. The source clips
+also contain pauses, so their full clip boundaries are not reference speech
+annotations; missed speech and overall DER were not calculated.
+
+This is one smoke comparison of two repeated synthetic voices, not a benchmark
+of natural Japanese talks, overlapping speech, or more than four speakers. Disk
+and library caches could be warm. RSS is the worker's process high-water mark,
+including its runtime and loaded model; it is not total system memory or CUDA
+allocation. The observed speed and memory differences do not promise improved
+Japanese accuracy or throughput on other hardware. Raw outputs, fixture spans,
+and the local comparison script are retained in the ignored
+`.validation/sortformer-japanese` directory of this working copy.

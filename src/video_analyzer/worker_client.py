@@ -18,9 +18,12 @@ PROTOCOL_VERSION = 1
 def worker_python(runtime_dir: Path, kind: str) -> Path:
     path = runtime_dir.resolve() / kind / "bin" / "python"
     if not path.is_file():
-        raise AnalysisError(
-            f"Worker environment is missing: {path}. Run scripts/setup-mac.sh or scripts/setup-cuda.sh."
+        setup = (
+            "mise run setup:sortformer"
+            if kind == "sortformer"
+            else "scripts/setup-mac.sh or scripts/setup-cuda.sh"
         )
+        raise AnalysisError(f"Worker environment is missing: {path}. Run {setup}.")
     return path
 
 

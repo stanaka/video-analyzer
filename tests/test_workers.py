@@ -9,7 +9,7 @@ import pytest
 
 import video_analyzer.worker_client as client
 from video_analyzer.errors import AnalysisError
-from video_analyzer.workers import audio, server
+from video_analyzer.workers import audio, server, sortformer
 
 
 @pytest.fixture
@@ -152,7 +152,8 @@ print(json.dumps(event), flush=True)
             worker.request("diarize")
 
 
-def test_server_progress_keeps_protocol_ids_and_redirects_model_prints(monkeypatch, capsys):
+@pytest.mark.parametrize("kind", ["diarization", "sortformer"])
+def test_server_progress_keeps_protocol_ids_and_redirects_model_prints(monkeypatch, capsys, kind):
     def diarize(*, audio, progress):
         assert audio == "input.wav"
         print("model diagnostic")
@@ -162,10 +163,11 @@ def test_server_progress_keeps_protocol_ids_and_redirects_model_prints(monkeypat
 
     backend = SimpleNamespace(device="cpu", diarize=diarize)
     monkeypatch.setattr(audio, "AudioBackend", lambda _: backend)
+    monkeypatch.setattr(sortformer, "SortformerBackend", lambda _: backend)
     monkeypatch.setattr(server, "enforce_worker_offline", lambda: None)
     monkeypatch.setattr(server, "capabilities", lambda: {})
     requests = [
-        {"version": 1, "id": "load", "operation": "load", "payload": {"kind": "diarization"}},
+        {"version": 1, "id": "load", "operation": "load", "payload": {"kind": kind}},
         {"version": 1, "id": "run", "operation": "diarize", "payload": {"audio": "input.wav"}},
     ]
     monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests))))
@@ -182,3 +184,11 @@ def test_server_progress_keeps_protocol_ids_and_redirects_model_prints(monkeypat
     assert responses[-1]["ok"] is True
     assert "elapsed_seconds" in responses[-1]["result"]
     assert output.err == "model diagnostic\n"
+
+
+def test_sortformer_import_failure_reaches_client(monkeypatch, tmp_path):
+    # The standard CLI interpreter intentionally has no optional NeMo install.
+    monkeypatch.setattr(client, "worker_python", lambda *_: Path(sys.executable))
+    with client.Worker(tmp_path, "sortformer", timeout=10) as worker:
+        with pytest.raises(AnalysisError, match="setup:sortformer"):
+            worker.request("capabilities", check_backend="sortformer")

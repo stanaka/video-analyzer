@@ -9,9 +9,18 @@ import traceback
 from ..offline import enforce_worker_offline
 
 
-def capabilities():
+def capabilities(check_backend=None):
     result = {"python": sys.version.split()[0], "packages": {}}
-    for name in ("torch", "transformers", "pyannote.audio", "qwen-asr", "mlx", "mlx-vlm"):
+    for name in (
+        "torch",
+        "torchaudio",
+        "transformers",
+        "pyannote.audio",
+        "qwen-asr",
+        "mlx",
+        "mlx-vlm",
+        "nemo-toolkit",
+    ):
         try:
             result["packages"][name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
@@ -24,6 +33,11 @@ def capabilities():
         import mlx.core as mx
 
         result["metal"] = mx.metal.is_available()
+    if check_backend == "sortformer":
+        from .sortformer import import_sortformer
+
+        import_sortformer()
+        result["sortformer"] = True
     return result
 
 
@@ -58,7 +72,7 @@ def main():
                     raise ValueError("Unsupported worker protocol version")
                 operation, payload = request["operation"], request["payload"]
                 if operation == "capabilities":
-                    result = capabilities()
+                    result = capabilities(**payload)
                 elif operation == "load":
                     if backend is not None:
                         raise ValueError("Use a fresh worker for each model stage")
@@ -70,11 +84,16 @@ def main():
                         from .vision import TorchVision
 
                         backend = TorchVision(payload)
+                    elif payload["kind"] == "sortformer":
+                        from .sortformer import SortformerBackend
+
+                        backend = SortformerBackend(payload)
                     else:
                         from .audio import AudioBackend
 
                         backend = AudioBackend(payload)
                     result = {"runtime": capabilities(), "device": backend.device}
+                    result.update(getattr(backend, "runtime_details", {}))
                 elif backend is None:
                     raise ValueError("Load a model before requesting inference")
                 elif operation == "diarize":

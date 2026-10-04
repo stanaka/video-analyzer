@@ -88,7 +88,7 @@ def parser():
         "--runtime-dir",
         type=Path,
         default=Path(".runtime"),
-        help="Parent directory of the torch and mlx worker environments (default: %(default)s)",
+        help="Parent directory of the torch, mlx, and optional sortformer worker environments (default: %(default)s)",
     )
     doctor.add_argument(
         "--verify-hashes",
@@ -163,7 +163,7 @@ def parser():
         "--runtime-dir",
         type=Path,
         default=Path(".runtime"),
-        help="Parent directory of the torch and mlx worker environments (default: %(default)s)",
+        help="Parent directory of the torch, mlx, and optional sortformer worker environments (default: %(default)s)",
     )
     analyze.add_argument(
         "--work-dir",
@@ -185,7 +185,7 @@ def parser():
     analyze.add_argument(
         "--num-speakers",
         type=int,
-        help="Known speaker count, at least 1; omitted means automatic estimation",
+        help="Known speaker count for pyannote, at least 1; omit when using Sortformer",
     )
     analyze.add_argument(
         "--audio-stream",
@@ -253,6 +253,15 @@ def parser():
         default=3600,
         help="Positive seconds allowed without worker progress (default: %(default)s)",
     )
+    for command in (prepare, doctor, analyze):
+        command.add_argument(
+            "--diarization-backend",
+            choices=("pyannote", "sortformer")
+            if command is analyze
+            else ("pyannote", "sortformer", "both"),
+            default="pyannote",
+            help="Speaker diarization backend; sortformer is NVIDIA v2.1, automatically estimates up to four speakers, and does not accept --num-speakers (default: %(default)s)",
+        )
     return cli
 
 
@@ -268,17 +277,27 @@ def diagnose(args) -> int:
     for name, path in report["executables"].items():
         if not path:
             report["errors"].append(f"Missing {name}")
-    for kind in ["torch", "mlx"] if profile == "mac" else ["torch"]:
+    worker_kinds = ["torch", "mlx"] if profile == "mac" else ["torch"]
+    if args.diarization_backend in ("sortformer", "both"):
+        worker_kinds.append("sortformer")
+    for kind in worker_kinds:
         try:
             with Worker(args.runtime_dir, kind, timeout=120) as worker:
-                report["workers"][kind] = worker.request("capabilities")
+                options = {"check_backend": "sortformer"} if kind == "sortformer" else {}
+                report["workers"][kind] = worker.request("capabilities", **options)
         except AnalysisError as exc:
             report["errors"].append(str(exc))
     if profile == "cuda" and not report["workers"].get("torch", {}).get("cuda"):
         report["errors"].append("CUDA is unavailable")
     if profile == "mac" and not report["workers"].get("mlx", {}).get("metal"):
         report["errors"].append("MLX Metal is unavailable")
-    for key in required_models(profile, args.asr):
+    if (
+        profile == "cuda"
+        and "sortformer" in worker_kinds
+        and not report["workers"].get("sortformer", {}).get("cuda")
+    ):
+        report["errors"].append("CUDA is unavailable in the Sortformer worker")
+    for key in required_models(profile, args.asr, diarization_backend=args.diarization_backend):
         try:
             model = local_models(args.model_dir, [key], verify_hashes=args.verify_hashes)[key]
             report["models"][key] = {"revision": model["revision"], "directory": model["directory"]}
@@ -297,6 +316,7 @@ def main(argv=None) -> int:
                 args.profile,
                 args.asr,
                 progress=lambda text: print(text, file=sys.stderr, flush=True),
+                diarization_backend=args.diarization_backend,
             )
             print(f"Models prepared in {args.model_dir.resolve()}", file=sys.stderr)
             return 0

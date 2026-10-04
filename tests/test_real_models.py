@@ -6,6 +6,8 @@ an empty general HF cache, exercising only the prepared model manifest/directory
 """
 
 import os
+import wave
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -18,17 +20,28 @@ from video_analyzer.worker_client import Worker
 
 pytestmark = pytest.mark.models
 
+DIARIZERS = ("pyannote", "sortformer")
+
+
+def selected_diarizers():
+    selected = os.environ.get("VIDEO_ANALYZER_TEST_DIARIZATION", "pyannote")
+    return DIARIZERS if selected == "both" else (selected,)
+
 
 @pytest.mark.parametrize("asr", ["whisper", "qwen"])
-def test_real_offline_pipeline(asr, monkeypatch, tmp_path):
+@pytest.mark.parametrize("diarizer", DIARIZERS)
+def test_real_offline_pipeline(asr, diarizer, monkeypatch, tmp_path):
     fixture = os.environ.get("VIDEO_ANALYZER_MODEL_TEST_VIDEO")
     if not fixture:
         pytest.skip("Set VIDEO_ANALYZER_MODEL_TEST_VIDEO to enable real-model tests")
+    if diarizer not in selected_diarizers():
+        pytest.skip("Set VIDEO_ANALYZER_TEST_DIARIZATION=sortformer or both")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "empty-hf"))
     monkeypatch.delenv("HF_TOKEN", raising=False)
     root = Path(__file__).resolve().parents[1]
     config = AnalysisConfig(
         asr=asr,
+        diarization_backend=diarizer,
         model_dir=root / ".models",
         runtime_dir=root / ".runtime",
         work_dir=tmp_path / "work",
@@ -51,7 +64,7 @@ def test_real_offline_pipeline(asr, monkeypatch, tmp_path):
     detected = {unit.language.lower() for unit in result.transcript if unit.language}
     assert set(filter(None, expected_languages.lower().split(","))) <= detected
     print(
-        f"{asr}: {result.provenance['elapsed_seconds']:.2f}s; {len(result.speakers)} speakers; {join_text(result.transcript)}"
+        f"{diarizer}/{asr}: {result.provenance['elapsed_seconds']:.2f}s; {len(result.speakers)} speakers; {join_text(result.transcript)}"
     )
 
     def unexpected_worker(*args, **kwargs):
@@ -63,6 +76,57 @@ def test_real_offline_pipeline(asr, monkeypatch, tmp_path):
     assert resumed.scenes == result.scenes
     assert resumed.transcript == result.transcript
     assert resumed.provenance["stage_metrics"] == result.provenance["stage_metrics"]
+
+
+def test_real_sortformer_short_silent_and_streaming_audio(monkeypatch, tmp_path, capfd):
+    """Small edge cases plus a >2-chunk recording, using only prepared assets."""
+    fixture = os.environ.get("VIDEO_ANALYZER_MODEL_TEST_VIDEO")
+    if not fixture or "sortformer" not in selected_diarizers():
+        pytest.skip("Select Sortformer and VIDEO_ANALYZER_MODEL_TEST_VIDEO for real-model tests")
+    from video_analyzer.media import extract_audio, probe
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "empty-hf"))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    root = Path(__file__).resolve().parents[1]
+    model = local_models(root / ".models", ["sortformer"])["sortformer"]
+    audio = tmp_path / "fixture.wav"
+    extract_audio(probe(Path(fixture)), audio)
+    with wave.open(str(audio), "rb") as source:
+        samples = source.readframes(source.getnframes())
+        assert source.getnchannels() == 1 and source.getframerate() == 16000
+    assert samples
+    # Enough audio to exercise cache/FIFO reuse across at least three 27.2s steps.
+    long_samples = (samples * (int(65 * 32000 / len(samples)) + 1))[: 65 * 32000]
+    device = (
+        "cuda"
+        if resolve_profile(os.environ.get("VIDEO_ANALYZER_TEST_PROFILE", "auto")) == "cuda"
+        else "cpu"
+    )
+    with Worker(root / ".runtime", "sortformer") as worker:
+        runtime = worker.request("load", kind="sortformer", model=model["directory"], device=device)
+        assert runtime["diarization_backend"] == "sortformer"
+        for name, pcm in (
+            ("empty", b""),
+            ("short", b"\0\0" * 160),
+            ("silence", b"\0\0" * 16000),
+            ("long", long_samples),
+        ):
+            target = tmp_path / f"{name}.wav"
+            with wave.open(str(target), "wb") as wav:
+                wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                wav.writeframes(pcm)
+            result = worker.request("diarize", audio=str(target))
+            duration = len(pcm) / 32000
+            assert all(
+                0 <= turn["start"] < turn["end"] <= duration
+                for turn in result["regular"] + result["exclusive"]
+            )
+            assert all(a["end"] <= b["start"] for a, b in pairwise(result["exclusive"]))
+            if name in ("empty", "short", "silence"):
+                assert result["regular"] == result["exclusive"] == []
+            else:
+                assert result["regular"]
+    assert "Sortformer streaming step 3" in capfd.readouterr().err
 
 
 def test_molmo_maximum_frame_budget(monkeypatch, tmp_path):

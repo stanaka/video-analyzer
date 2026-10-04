@@ -29,6 +29,10 @@ def render_markdown(result: AnalysisResult) -> str:
     transcription = settings.get("transcription", True)
     diarization = settings.get("diarization", True)
     scene_description = settings.get("scene_description", True)
+    normalization = settings.get("audio_normalization", "off")
+    noise_reduction = settings.get("noise_reduction", False)
+    enabled_status = "有効" if ja else "Enabled"
+    disabled_status = "無効" if ja else "Disabled"
     lines = ["# 動画解析レポート" if ja else "# Video analysis report", ""]
     lines += [
         f"- {'動画' if ja else 'Video'}: {escape(result.media.path)}",
@@ -41,10 +45,31 @@ def render_markdown(result: AnalysisResult) -> str:
         ("話者区分" if ja else "Diarization", diarization),
         ("映像の説明" if ja else "Scene description", scene_description),
     ):
-        status = ("有効" if enabled else "無効") if ja else ("Enabled" if enabled else "Disabled")
+        status = enabled_status if enabled else disabled_status
         lines.append(f"- {label}: {status}")
     lines.append("")
     lines += ["## モデルと実行環境" if ja else "## Models and runtime", ""]
+    normalization_status = (
+        f"{enabled_status} ({escape(normalization)})" if normalization != "off" else disabled_status
+    )
+    lines += [
+        f"- {'音量正規化' if ja else 'Audio normalization'}: {normalization_status}",
+        f"- {'ノイズ除去' if ja else 'Noise reduction'}: {enabled_status if noise_reduction else disabled_status}",
+    ]
+    if normalization != "off" or noise_reduction:
+        skipped_reason = None
+        if result.media.audio_stream_index is None:
+            skipped_reason = "音声トラックがありません。" if ja else "no audio track."
+        elif not transcription and not diarization:
+            skipped_reason = (
+                "文字起こしと話者区分が無効です。"
+                if ja
+                else "transcription and diarization are disabled."
+            )
+        if skipped_reason:
+            lines.append(
+                f"- {'音声前処理をスキップ' if ja else 'Audio preprocessing skipped'}: {skipped_reason}"
+            )
     for name, entry in result.provenance.get("models", {}).items():
         quant = f" ({entry['quantization']})" if entry.get("quantization") else ""
         lines.append(

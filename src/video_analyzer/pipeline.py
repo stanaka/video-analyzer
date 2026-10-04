@@ -9,7 +9,7 @@ from pathlib import Path
 from . import __version__
 from .errors import AnalysisError
 from .media import detect_scenes, extract_audio, extract_frames, probe, windows
-from .models import local_models, required_models, resolve_profile
+from .models import DIARIZATION_MODELS, local_models, required_models, resolve_profile
 from .schema import AnalysisConfig, AnalysisResult, Observation, Scene
 from .storage import Checkpoints, file_hash
 from .timeline import assign_units, audio_chunks, normalize_speakers, owned_units, speech_chunks
@@ -33,12 +33,20 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
         audio=has_audio,
         transcription=config.transcription,
         diarization=config.diarization,
+        diarization_backend=config.diarization_backend,
         scene_description=config.scene_description,
     )
     models = local_models(config.model_dir, required) if required else {}
     vision_kind = "molmo-mlx" if profile == "mac" else "molmo-torch"
-    if (has_audio and audio_enabled) or (config.scene_description and profile != "mac"):
+    diarization_kind = DIARIZATION_MODELS[config.diarization_backend]
+    diarization_runtime = "sortformer" if config.diarization_backend == "sortformer" else "torch"
+    if (
+        has_audio
+        and (config.transcription or (config.diarization and diarization_runtime == "torch"))
+    ) or (config.scene_description and profile != "mac"):
         worker_python(config.runtime_dir, "torch")
+    if has_audio and config.diarization and diarization_runtime == "sortformer":
+        worker_python(config.runtime_dir, "sortformer")
     if config.scene_description and profile == "mac":
         worker_python(config.runtime_dir, "mlx")
         if config.vision_device != "auto":
@@ -119,12 +127,14 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
             if config.diarization:
                 diarization = cache.get("diarization")
                 if diarization is None:
-                    progress("Identifying speakers")
-                    with Worker(config.runtime_dir, "torch", config.worker_timeout) as worker:
+                    progress(f"Identifying speakers with {config.diarization_backend}")
+                    with Worker(
+                        config.runtime_dir, diarization_runtime, config.worker_timeout
+                    ) as worker:
                         runtime = worker.request(
                             "load",
-                            kind="diarization",
-                            model=models["diarization"]["directory"],
+                            kind=diarization_kind,
+                            model=models[diarization_kind]["directory"],
                             device=device(config.diarization_device),
                         )
                         diarization = worker.request(

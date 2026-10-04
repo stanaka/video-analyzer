@@ -242,15 +242,21 @@ COMBINATIONS = list(itertools.product((False, True), repeat=3))
 
 @pytest.mark.parametrize("enabled", COMBINATIONS)
 @pytest.mark.parametrize("asr", ["whisper", "qwen"])
-@pytest.mark.parametrize("profile", ["cpu", "mac"])
+@pytest.mark.parametrize("profile", ["cpu", "mac", "cuda"])
+@pytest.mark.parametrize("backend", ["pyannote", "sortformer"])
 def test_independent_features_and_resume(
-    enabled, asr, profile, simulated_media, fake_models, monkeypatch, tmp_path
+    enabled, asr, profile, backend, simulated_media, fake_models, monkeypatch, tmp_path
 ):
     path, media, calls = simulated_media
     flags = dict(zip(FEATURES, enabled, strict=True))
     transcription, diarization, vision = enabled
     config = AnalysisConfig(
-        **flags, asr=asr, profile=profile, report_language="en", work_dir=tmp_path / "work"
+        **flags,
+        asr=asr,
+        profile=profile,
+        diarization_backend=backend,
+        report_language="en",
+        work_dir=tmp_path / "work",
     )
     fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
     checked_models, checked_workers = [], []
@@ -268,7 +274,7 @@ def test_independent_features_and_resume(
     if vision:
         expected_models.add("molmo-mlx" if profile == "mac" else "molmo-torch")
     if diarization:
-        expected_models.add("diarization")
+        expected_models.add("diarization" if backend == "pyannote" else "sortformer")
     if transcription:
         expected_models.add(asr)
         if asr == "qwen":
@@ -276,8 +282,10 @@ def test_independent_features_and_resume(
     assert set(checked_models) == expected_models
     assert set(result.provenance["models"]) == expected_models
     expected_workers = set()
-    if transcription or diarization or (vision and profile == "cpu"):
+    if transcription or (diarization and backend == "pyannote") or (vision and profile != "mac"):
         expected_workers.add("torch")
+    if diarization and backend == "sortformer":
+        expected_workers.add("sortformer")
     if vision and profile == "mac":
         expected_workers.add("mlx")
     assert set(checked_workers) == expected_workers
@@ -302,6 +310,7 @@ def test_independent_features_and_resume(
     assert all(result.provenance["configuration"][key] == value for key, value in flags.items())
     loads = [payload for operation, payload in fake_models.requests if operation == "load"]
     assert {payload["kind"] for payload in loads} == expected_models - {"aligner"}
+    assert all(payload["device"] == ("auto" if profile == "mac" else profile) for payload in loads)
     if transcription and asr == "qwen":
         assert next(payload for payload in loads if payload["kind"] == "qwen")["aligner"]
     assert fake_models.operations.count("diarize") == int(diarization)
@@ -351,14 +360,56 @@ def test_feature_changes_separate_checkpoints(feature, simulated_media, fake_mod
     assert fake_models.requests == requests
 
 
+@pytest.mark.parametrize("change", ["backend", "revision"])
+def test_diarization_identity_separates_transcription_checkpoints(
+    change, simulated_media, fake_models, monkeypatch, tmp_path
+):
+    path, media, _ = simulated_media
+    fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
+    config = AnalysisConfig(
+        profile="cpu",
+        diarization_backend="sortformer",
+        scene_description=False,
+        work_dir=tmp_path / "work",
+    )
+    pipeline.analyze_video(path, config)
+    local = pipeline.local_models
+
+    def changed_models(root, keys):
+        models = local(root, keys)
+        models["sortformer"]["revision"] = "different-checkpoint"
+        return models
+
+    with monkeypatch.context() as patch:
+        changed = config.model_copy(update={"resume": True})
+        if change == "backend":
+            changed.diarization_backend = "pyannote"
+        else:
+            patch.setattr(pipeline, "local_models", changed_models)
+        pipeline.analyze_video(path, changed)
+    assert fake_models.operations.count("diarize") == 2
+    assert fake_models.operations.count("transcribe") == 6
+    requests = fake_models.requests.copy()
+    pipeline.analyze_video(path, config.model_copy(update={"resume": True}))
+    assert fake_models.requests == requests
+
+
 @pytest.mark.parametrize("enabled", COMBINATIONS)
-def test_feature_selection_without_audio(enabled, simulated_media, fake_models, tmp_path):
+@pytest.mark.parametrize("backend", ["pyannote", "sortformer"])
+def test_feature_selection_without_audio(
+    enabled, backend, simulated_media, fake_models, tmp_path, monkeypatch
+):
     path, media, calls = simulated_media
     media.audio_stream_index = None
     media.audio_start = None
     config = AnalysisConfig(
-        **dict(zip(FEATURES, enabled, strict=True)), profile="cpu", work_dir=tmp_path / "work"
+        **dict(zip(FEATURES, enabled, strict=True)),
+        profile="cpu",
+        work_dir=tmp_path / "work",
+        diarization_backend=backend,
     )
+    checked_workers = []
+    monkeypatch.setattr(pipeline, "worker_python", lambda _, kind: checked_workers.append(kind))
     result = pipeline.analyze_video(path, config)
     assert calls["audio"] == 0
     assert "diarize" not in fake_models.operations and "transcribe" not in fake_models.operations
@@ -367,6 +418,7 @@ def test_feature_selection_without_audio(enabled, simulated_media, fake_models, 
     if result.warnings:
         assert "音声トラック" in result.warnings[0]
     assert set(result.provenance["models"]) == ({"molmo-torch"} if enabled[2] else set())
+    assert checked_workers == (["torch"] if enabled[2] else [])
 
 
 @pytest.mark.integration
@@ -523,8 +575,16 @@ def test_invalid_audio_normalization():
 
 @pytest.mark.parametrize("normalization,noise_reduction", AUDIO_PROCESSING)
 @pytest.mark.parametrize("asr", ["whisper", "qwen"])
+@pytest.mark.parametrize("backend", ["pyannote", "sortformer"])
 def test_shared_processed_audio_and_resume(
-    normalization, noise_reduction, asr, simulated_media, fake_models, monkeypatch, tmp_path
+    normalization,
+    noise_reduction,
+    asr,
+    backend,
+    simulated_media,
+    fake_models,
+    monkeypatch,
+    tmp_path,
 ):
     path, media, calls = simulated_media
     fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
@@ -541,6 +601,7 @@ def test_shared_processed_audio_and_resume(
     config = AnalysisConfig(
         profile="cpu",
         asr=asr,
+        diarization_backend=backend,
         scene_description=False,
         work_dir=tmp_path / "work",
         audio_normalization=normalization,

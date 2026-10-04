@@ -1,9 +1,17 @@
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from video_analyzer.errors import AnalysisError
-from video_analyzer.models import local_models, required_models
+from video_analyzer.models import (
+    MODEL_REPOS,
+    SORTFORMER_CHECKPOINT,
+    local_models,
+    prepare_models,
+    required_models,
+)
 from video_analyzer.storage import Checkpoints, atomic_json, file_hash
 
 
@@ -110,3 +118,128 @@ def test_required_models_preserves_defaults(profile, vision, asr, speech):
     assert required_models(profile, asr) == [vision, "diarization", *speech]
     assert required_models(profile, asr, audio=False) == [vision]
     assert required_models(profile, asr, transcription=False) == [vision, "diarization"]
+
+
+@pytest.mark.parametrize(
+    "backend,keys",
+    [
+        ("pyannote", ["diarization"]),
+        ("sortformer", ["sortformer"]),
+        ("both", ["diarization", "sortformer"]),
+    ],
+)
+def test_selected_diarization_models(backend, keys):
+    options = dict(scene_description=False, transcription=False, diarization_backend=backend)
+    assert required_models("cpu", "whisper", **options) == keys
+    assert required_models("cpu", "whisper", audio=False, **options) == []
+    assert required_models("cpu", "whisper", diarization=False, **options) == []
+
+
+@pytest.mark.parametrize("files", [{"README.md": b"metadata only"}, {SORTFORMER_CHECKPOINT: b""}])
+def test_sortformer_requires_nonempty_checkpoint(tmp_path, files):
+    for name, content in files.items():
+        (tmp_path / name).write_bytes(content)
+    atomic_json(
+        tmp_path / "manifest.json",
+        {
+            "schema_version": 1,
+            "models": {
+                "sortformer": {
+                    "repo_id": MODEL_REPOS["sortformer"],
+                    "revision": "abc",
+                    "path": ".",
+                    "files": {
+                        name: {"size": len(content), "sha256": file_hash(tmp_path / name)}
+                        for name, content in files.items()
+                    },
+                }
+            },
+        },
+    )
+    with pytest.raises(AnalysisError, match="NVIDIA v2.1 checkpoint"):
+        local_models(tmp_path, ["sortformer"])
+
+
+@pytest.fixture
+def hub(monkeypatch, tmp_path):
+    import huggingface_hub
+
+    import video_analyzer.models as models
+
+    executable = tmp_path / "hf"
+    executable.touch()
+    monkeypatch.setattr(models.shutil, "which", lambda _: str(executable))
+    sources = {}
+    requests = []
+    for key, repo in MODEL_REPOS.items():
+        filename = SORTFORMER_CHECKPOINT if key == "sortformer" else "model.safetensors"
+        sources[repo] = {filename: b"weights", "README.md": b"model card"}
+
+    def info(repo, **kwargs):
+        requests.append(repo)
+        return SimpleNamespace(
+            sha="resolved-immutable-sha",
+            siblings=[
+                SimpleNamespace(rfilename=name, size=len(content))
+                for name, content in sources[repo].items()
+            ],
+        )
+
+    def download(command, **kwargs):
+        repo = command[2]
+        end = command.index("--revision")
+        assert command[end + 1] == "resolved-immutable-sha"
+        destination = Path(command[command.index("--local-dir") + 1])
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in command[3:end]:
+            (destination / name).write_bytes(sources[repo][name])
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: SimpleNamespace(model_info=info))
+    monkeypatch.setattr(models.subprocess, "run", download)
+    return sources, requests
+
+
+def test_preparation_coexists_preserves_models_and_hashes_checkpoint(tmp_path, hub):
+    root = tmp_path / "models"
+    first = prepare_models(root, "cuda", "both", diarization_backend="pyannote")
+    assert "sortformer" not in first["models"]
+    second = prepare_models(root, "cuda", "whisper", diarization_backend="sortformer")
+    assert all(second["models"][key] == value for key, value in first["models"].items())
+    checkpoint = second["models"]["sortformer"]
+    assert checkpoint["revision"] == "resolved-immutable-sha"
+    assert checkpoint["files"][SORTFORMER_CHECKPOINT] == {
+        "size": 7,
+        "sha256": file_hash(root / "sortformer" / SORTFORMER_CHECKPOINT),
+    }
+    both = prepare_models(root, "cuda", "both", diarization_backend="both")
+    assert both == second
+    assert set(local_models(root, list(both["models"]), verify_hashes=True)) == set(both["models"])
+    (root / "sortformer" / SORTFORMER_CHECKPOINT).unlink()
+    with pytest.raises(AnalysisError, match="Missing or incomplete.*sortformer"):
+        local_models(root, ["sortformer"])
+
+
+def test_upstream_sortformer_metadata_without_checkpoint_fails(tmp_path, hub):
+    sources, _ = hub
+    del sources[MODEL_REPOS["sortformer"]][SORTFORMER_CHECKPOINT]
+    with pytest.raises(AnalysisError, match="Missing diar_streaming_sortformer"):
+        prepare_models(tmp_path / "models", "cuda", "whisper", diarization_backend="sortformer")
+
+
+def test_download_failure_names_selected_backend(tmp_path, hub, monkeypatch):
+    import subprocess
+
+    import video_analyzer.models as models
+
+    download = models.subprocess.run
+
+    def fail_sortformer(command, **kwargs):
+        if MODEL_REPOS["sortformer"] in command:
+            raise subprocess.CalledProcessError(1, command)
+        return download(command, **kwargs)
+
+    monkeypatch.setattr(models.subprocess, "run", fail_sortformer)
+    with pytest.raises(
+        AnalysisError, match="Cannot prepare nvidia/diar_streaming_sortformer_4spk-v2.1"
+    ):
+        prepare_models(tmp_path / "models", "cuda", "whisper", diarization_backend="sortformer")

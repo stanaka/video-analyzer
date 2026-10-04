@@ -1,7 +1,7 @@
 min_version = "2026.9.16"
 
 [tools]
-python = "3.11.15"
+python = ["3.11.15", "3.12.15"]
 uv = "0.12.11"
 
 [settings]
@@ -10,8 +10,8 @@ python.uv_venv_auto = "source"
 
 [env]
 UV_CACHE_DIR = "{{ config_root }}/.uv-cache"
-# mise owns Python installation; uv owns the three virtual environments.
-UV_PYTHON = { value = "{{ tools.python.path }}/bin/python", tools = true }
+# mise owns Python installation; uv owns the CLI and optional worker environments.
+UV_PYTHON = { value = "{{ tools.python[0].path }}/bin/python", tools = true }
 UV_PYTHON_DOWNLOADS = "never"
 
 [tasks.setup]
@@ -29,6 +29,10 @@ run = "bash scripts/setup-cuda.sh"
 [tasks."setup:dev"]
 description = "Install CLI and test dependencies only, without model workers"
 run = "uv sync --frozen"
+
+[tasks."setup:sortformer"]
+description = "Install the optional Sortformer v2.1 worker with Python 3.12"
+run = "bash scripts/setup-sortformer.sh"
 
 # Runtime tasks deliberately have no setup dependency: they never install packages
 # or download models implicitly. Arguments are forwarded to the underlying CLI.

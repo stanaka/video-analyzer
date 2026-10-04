@@ -5,7 +5,7 @@ and visual descriptions. After explicit model preparation, analysis runs locally
 without downloads or hosted inference services.
 
 - **Speech:** Whisper large-v3 (default), or Qwen3-ASR-1.7B with Qwen3-ForcedAligner-0.6B.
-- **Speakers:** pyannote `speaker-diarization-community-1`, retaining overlapping and exclusive turns.
+- **Speakers:** pyannote `speaker-diarization-community-1` (default), or NVIDIA Sortformer v2.1, retaining overlapping and exclusive turns.
 - **Scenes:** PySceneDetect's adaptive detector, using presentation timestamps for variable frame rates.
 - **Descriptions:** Molmo2-8B, using a 4-bit MLX conversion on Apple Silicon and original weights on CUDA.
 - **Reports:** Markdown or JSON. Japanese headings/descriptions and original-language speech by default.
@@ -13,7 +13,8 @@ without downloads or hosted inference services.
 ## Install
 
 Use [mise](https://mise.jdx.dev/getting-started.html) and FFmpeg including `ffprobe`.
-The project's `mise.toml` pins Python 3.11.15 and uv 0.12.11; `mise.lock` records
+The project's `mise.toml` pins Python 3.11.15 (default), Python 3.12.15 for the
+optional Sortformer worker, and uv 0.12.11; `mise.lock` records
 download URLs and checksums for Apple Silicon and Linux x86_64. Use mise
 2026.9.16 or newer, and run these commands from the repository.
 
@@ -85,6 +86,64 @@ the Mac installation with both ASR backends, plus input videos and working audio
 completeness; `--verify-hashes` also reads weights to verify SHA-256 checksums. It
 does not run inference. macOS processes need access to Metal for MLX inference.
 
+### Optional Sortformer v2.1 diarization
+
+After the regular setup, install the separate NVIDIA reference runtime and
+explicitly prepare its checkpoint:
+
+```bash
+mise install --locked
+mise run setup:sortformer
+mise run prepare-models --profile mac --diarization-backend sortformer
+mise run doctor --profile mac --diarization-backend sortformer --verify-hashes
+mise run analyze input.mp4 --diarization-backend sortformer
+```
+
+Use `--profile cuda` for Linux CUDA. For Linux CPU inference, prepare with
+`--profile cuda`, then use `--profile cpu` with `doctor` and `analyze`. The optional
+`.runtime/sortformer` environment uses Python **3.12.15**, `nemo-toolkit[asr]==2.7.3`,
+and PyTorch/torchaudio **2.8.0** with separate hash locks for Apple Silicon and
+Linux x86_64. Existing setup tasks and default pyannote diagnostics do not install
+or require NeMo. Python 3.11 remains the default for the CLI and existing workers.
+
+The checkpoint is NVIDIA's pretrained
+[`diar_streaming_sortformer_4spk-v2.1`](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1),
+with a **four-speaker maximum**. It is not a Japanese fine-tuned variant, and better
+Japanese accuracy is not assumed. It uses CPU on Mac and CPU/CUDA on Linux;
+Apple GPU acceleration and live microphone input are not supported. Omit
+`--num-speakers` when Sortformer diarization is enabled: an explicit count is
+rejected, with guidance to select pyannote if a known count is needed.
+
+Preparation downloads the exact `.nemo` file (approximately 450 MiB) and records
+its resolved revision, size, and SHA-256 under the separate `sortformer` manifest
+entry. Existing pyannote (`diarization`) and ASR assets are retained. Use
+`--diarization-backend both` on `prepare-models` or `doctor` to prepare or check
+both diarizers; `analyze` accepts one backend. Sortformer itself does not require
+Hugging Face authentication. Pyannote's access agreement is needed only when
+preparing pyannote. Preparation and doctor still include the chosen ASR and
+profile's vision models.
+
+Sortformer consumes the same processed 16 kHz mono audio as transcription. A
+single recording retains streaming speaker state throughout inference, with
+batch size one and no data-loader subprocesses. NVIDIA's recording preset uses
+chunk length 340, right context 40, FIFO length 40, speaker cache length 188, and
+cache update period 300 (80 ms frames). NeMo reports an effective cache update
+period of 340 for this preset because it updates at completed chunk boundaries.
+The configured and effective settings are recorded in provenance.
+
+The regular timeline uses NeMo's default postprocessing and retains overlap. The
+exclusive timeline selects the highest-probability **active** speaker in each
+80 ms frame, using the lower model speaker index for ties. It is restricted to
+regular speech regions, preserves silence, merges adjacent identical labels,
+and clips timestamps to the recording duration. Reports retain the existing
+schema, canonical speaker IDs, and transcript assignment behavior. Backend,
+checkpoint revision, runtime versions, inference settings, and exclusive-timeline
+derivation are recorded in JSON provenance. Switching backends or checkpoints
+uses a separate analysis cache, including transcription results.
+
+`--no-diarization` and videos without audio require neither diarizer's assets nor
+its worker environment, regardless of the selected backend.
+
 ## Analyze
 
 ```bash
@@ -122,10 +181,11 @@ after all stages succeed. Existing reports are preserved on failure.
 | `--diarization` / `--no-diarization` | enabled | Enable or disable speaker identification |
 | `--scene-description` / `--no-scene-description` | enabled | Enable or disable visual descriptions; scene detection always runs |
 | `--asr` | `whisper` | Whisper or Qwen |
+| `--diarization-backend` | `pyannote` | Community-1 or pretrained Sortformer v2.1 (maximum four speakers) |
 | `--profile` | `auto` | MLX on Apple Silicon; CUDA elsewhere. Explicit `cpu` is available for large-memory hosts. |
 | `--language` | automatic | Spoken language hint, such as `ja` or `en`; no translation |
 | `--report-language` | `ja` | Japanese or English headings/descriptions |
-| `--num-speakers` | automatic | Optional known speaker count |
+| `--num-speakers` | automatic | Optional known speaker count for pyannote; rejected with enabled Sortformer diarization |
 | `--audio-stream` | `0` | Zero-based audio stream ordinal, not container stream index |
 | `--audio-normalization` | `off` | `off`, `peak` for one gain adjustment across the recording, or `dynamic` to balance quiet and loud passages |
 | `--noise-reduction` / `--no-noise-reduction` | disabled | Reduce rumble and background noise before normalization and audio analysis |
@@ -137,7 +197,7 @@ after all stages succeed. Existing reports are preserved on failure.
 | `--diarization-device` | `auto` | CPU on Mac, CUDA on the CUDA profile |
 | `--vision-device` | `auto` | MLX/Metal on Mac; CPU/CUDA overrides for PyTorch vision |
 | `--model-dir` | `.models` | Prepared models |
-| `--runtime-dir` | `.runtime` | Parent of `torch` and `mlx` environments |
+| `--runtime-dir` | `.runtime` | Parent of `torch`, `mlx`, and optional `sortformer` environments |
 | `--work-dir` | `.video-analyzer` beside input | Checkpoints and temporary audio |
 | `--worker-timeout` | `3600` | Seconds allowed without worker progress; diarization batch progress resets the timer |
 
@@ -149,7 +209,8 @@ for transcription without speaker labels, or `--no-transcription --no-diarizatio
 for visual-only analysis. Disabled features do not require their model assets or
 worker environments. Disabling all three produces media metadata and detected
 scene boundaries without requiring any prepared models or model workers.
-`prepare-models` and `doctor` continue to prepare/check the full set of models.
+`prepare-models` and `doctor` prepare/check the selected diarization and ASR
+backends plus the profile's vision model.
 Markdown reports list the enabled features and omit disabled content sections;
 JSON retains its existing fields, with empty lists for disabled outputs.
 
@@ -200,7 +261,11 @@ As the [noisy-audio guide](https://vocova.app/blog/transcribe-noisy-audio)
 recommends, compare transcription of a representative sample with and without
 denoising: cleaner-sounding audio does not always improve recognition. The
 selected mode and noise-reduction flag are recorded in JSON
-`provenance.configuration`. Changing either uses a separate checkpoint directory;
+`provenance.configuration`. Markdown reports show the configured normalization
+mode and noise-reduction enabled/disabled status in the "Models and runtime"
+section, localized to the report language. If enabled preprocessing was skipped,
+the report explains whether the input has no audio track or both transcription
+and diarization are disabled. Changing either uses a separate checkpoint directory;
 `--resume` reuses work only for matching settings.
 
 ## Python API
@@ -224,6 +289,9 @@ result = analyze_video(
     Path("input.mp4"),
     AnalysisConfig(audio_normalization="dynamic", noise_reduction=True),
 )
+
+# Select pretrained Sortformer v2.1 after preparing its optional runtime and model.
+result = analyze_video(Path("input.mp4"), AnalysisConfig(diarization_backend="sortformer"))
 ```
 
 The API returns a Pydantic `AnalysisResult` without writing a report. Importing it
@@ -254,8 +322,9 @@ transcript speaker IDs remain unset. Scene detection still runs when visual
 descriptions are disabled, retaining scene timestamps and transcript references.
 No-audio videos produce visual reports. Silence produces an empty transcript.
 
-Diarization reports its device, audio duration, and progress through segmentation,
-speaker embeddings, and clustering on stderr. The worker timeout measures time
+Diarization reports its device, audio duration, and progress on stderr: pyannote
+reports segmentation, speaker embeddings, and clustering; Sortformer reports
+completed streaming steps. The worker timeout measures time
 without progress, so a long recording can take more than one hour in total while
 batches continue completing. Model loading, ASR chunks, visual windows, and
 clustering must each finish within the timeout when they provide no intermediate
@@ -332,6 +401,12 @@ general Hugging Face cache, check resume without workers, and exercise eight
 768-pixel frames. Set `VIDEO_ANALYZER_TEST_PROFILE=cuda` on Linux. Optional
 `VIDEO_ANALYZER_TEST_LANGUAGES=japanese,english` asserts detected languages in a
 multilingual fixture.
+To exercise both prepared diarizers, set `VIDEO_ANALYZER_TEST_DIARIZATION=both`
+(`sortformer` selects only that backend; the default is `pyannote`). Sortformer
+acceptance also covers empty, very short, silent, and multiple-chunk recordings.
+For independent offline acceptance, run the tests inside an OS network sandbox
+as shown in the validation notes. Linux CUDA installation and inference still
+need validation on an NVIDIA host.
 See [validation notes](docs/validation.md) for hardware tests actually performed.
 
 Upstream libraries/models retain their licenses. Community-1 is CC-BY-4.0; see
