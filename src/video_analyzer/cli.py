@@ -327,6 +327,24 @@ def parser(*, sparse=False):
     export.add_argument(
         "--video", type=Path, help="Original MP4 at a new location; its recorded hash must match"
     )
+    markdown = commands.add_parser(
+        "export-markdown",
+        help="Export a Markdown report from a saved JSON analysis, without models",
+        description="Create a full Markdown report from a saved JSON analysis.\n"
+        "No original video, FFmpeg, or models are required.\n"
+        "Stdout prints the completed report path.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+        "  video-analyzer export-markdown input.analysis.json\n"
+        "  video-analyzer export-markdown report.json -o reports/review.md",
+    )
+    markdown.add_argument("input", type=Path, help="Saved JSON analysis result")
+    markdown.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Markdown path; defaults to the JSON path with .md extension",
+    )
     if sparse:
         # Only supplied analysis flags should override YAML. Keep the public
         # parser's defaults and help unchanged for ordinary callers.
@@ -407,6 +425,16 @@ def main(argv=None) -> int:
                 raise AnalysisError("Output must not overwrite the input JSON")
             result = AnalysisResult.model_validate(read_json(args.input))
             print(write_html(result, output, video_path=args.video))
+            return 0
+        if args.command == "export-markdown":
+            output = args.output or args.input.with_suffix(".md")
+            if output.resolve() == args.input.resolve():
+                raise AnalysisError("Output must not overwrite the input JSON")
+            result = AnalysisResult.model_validate(read_json(args.input))
+            if output.resolve() == Path(result.media.path).resolve():
+                raise AnalysisError("Output must not overwrite the input video")
+            atomic_text(output, render_markdown(result))
+            print(str(output.resolve()))
             return 0
         explicit = parser(sparse=True).parse_args(argv)
         options = {

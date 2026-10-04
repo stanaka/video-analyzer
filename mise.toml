@@ -64,6 +64,11 @@ description = "Export an offline HTML viewer from a saved JSON analysis"
 raw_args = true
 run = ".venv/bin/video-analyzer export-html"
 
+[tasks.export-markdown]
+description = "Export a Markdown report from a saved JSON analysis without models"
+raw_args = true
+run = ".venv/bin/video-analyzer export-markdown"
+
 [tasks."setup:browser-tests"]
 description = "Explicitly download Chromium for HTML viewer tests"
 run = "PLAYWRIGHT_BROWSERS_PATH=.cache/playwright .venv/bin/python -m playwright install chromium"

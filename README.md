@@ -220,6 +220,7 @@ without running the command:
 mise run prepare-models --help
 mise run doctor --help
 mise run analyze --help
+mise run export-markdown --help
 ```
 
 With the virtual environment activated, use `video-analyzer --help` for the
@@ -434,6 +435,31 @@ section, localized to the report language. If enabled preprocessing was skipped,
 the report explains whether the input has no audio track or both transcription
 and diarization are disabled. Changing either uses a separate checkpoint directory;
 `--resume` reuses work only for matching settings.
+
+### Export a Markdown report
+
+Convert a saved JSON analysis into the full Markdown report without rerunning
+inference. The original video, FFmpeg, and models are not required:
+
+```bash
+mise run export-markdown input.analysis.json
+mise run export-markdown report.json -o reports/review.md
+# With the environment activated:
+video-analyzer export-markdown input.analysis.json
+video-analyzer export-markdown report.json --help
+```
+
+By default, the command replaces the JSON path's final extension with `.md`, so
+`input.analysis.json` produces `input.analysis.md`. Use `-o` / `--output` for a
+custom path; missing parent directories are created. The report retains the
+recorded Japanese or English language and includes scene descriptions,
+timestamped speech, provenance, and warnings, just like `analyze --format markdown`.
+Stdout prints the absolute completed report path.
+
+The input JSON is preserved. Output cannot refer to that JSON or the recorded
+original video. Existing reports are replaced atomically after successful
+rendering; read, validation, or write failures exit nonzero and preserve the
+existing report.
 
 ### Interactive HTML viewer
 

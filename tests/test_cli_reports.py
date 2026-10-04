@@ -1,9 +1,19 @@
+from pathlib import Path
+
 import pytest
 
 from video_analyzer import cli
 from video_analyzer.errors import AnalysisError
 from video_analyzer.media import probe
-from video_analyzer.schema import AnalysisResult, Scene
+from video_analyzer.report import render_json, render_markdown
+from video_analyzer.schema import (
+    AnalysisResult,
+    MediaInfo,
+    Observation,
+    Scene,
+    Speaker,
+    TranscriptUnit,
+)
 
 
 @pytest.fixture
@@ -143,9 +153,12 @@ def test_presentation_failure_preserves_new_json_for_export(
     monkeypatch.setattr(
         cli, "analyze_video", lambda *_: pytest.fail("Export must not rerun analysis")
     )
-    exported = tmp_path / "retry.html"
-    assert cli.main(["export-html", str(json_output), "-o", str(exported)]) == 0
-    assert exported.read_text().startswith("<!doctype html>")
+    exported = tmp_path / ("retry.html" if format_option == "html" else "retry.md")
+    assert cli.main([f"export-{format_option}", str(json_output), "-o", str(exported)]) == 0
+    if format_option == "html":
+        assert exported.read_text().startswith("<!doctype html>")
+    else:
+        assert exported.read_text(encoding="utf-8") == render_markdown(result)
 
 
 @pytest.mark.integration
@@ -167,3 +180,164 @@ def test_json_write_failure_does_not_publish_selected_report(
     assert cli.main(["analyze", str(video), "--format", format_option, "-o", str(output)]) == 1
     assert output.read_text() == "old selected report"
     assert json_output.read_text() == "old JSON"
+
+
+@pytest.fixture
+def markdown_result(tmp_path):
+    return AnalysisResult(
+        application_version="0.1.0",
+        media=MediaInfo(
+            path=str(tmp_path / "missing video 日本語.mp4"),
+            duration=4,
+            width=160,
+            height=120,
+            video_stream_index=0,
+            video_start=0,
+        ),
+        report_language="en",
+        provenance={"runtimes": {"asr": {"device": "cpu"}}},
+        speakers=[Speaker(id="speaker_01")],
+        transcript=[
+            TranscriptUnit(id="t1", start=1, end=2, text="こんにちは", speaker_id="speaker_01")
+        ],
+        scenes=[
+            Scene(
+                id="scene_0001",
+                start=0,
+                end=4,
+                transcript_ids=["t1"],
+                observations=[
+                    Observation(start=0, end=4, description="青い空", frame_timestamps=[1])
+                ],
+            )
+        ],
+        warnings=["Fixture warning"],
+    )
+
+
+@pytest.mark.parametrize("language", ["ja", "en"])
+@pytest.mark.parametrize("output_kind", ["default", "nested", "extensionless", "existing"])
+def test_export_markdown_from_json_without_media_or_models(
+    tmp_path, markdown_result, monkeypatch, capsys, language, output_kind
+):
+    markdown_result.report_language = language
+    source = tmp_path / "input.analysis.json"
+    source.write_text(render_json(markdown_result), encoding="utf-8")
+    before = source.read_bytes()
+    output = source.with_suffix(".md")
+    args = ["export-markdown", source.name]
+    monkeypatch.chdir(tmp_path)
+    if output_kind != "default":
+        output = (
+            tmp_path / "reports" / ("review" if output_kind == "extensionless" else "review.md")
+        )
+        args.extend(["--output", str(output.relative_to(tmp_path))])
+    if output_kind == "existing":
+        output.parent.mkdir()
+        output.write_text("old report")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Markdown export must not use analysis, media tools, or models")
+
+    for name in ("analyze_video", "write_html", "prerequisites", "prepare_models", "Worker"):
+        monkeypatch.setattr(cli, name, unexpected)
+    monkeypatch.setenv("PATH", "")
+    assert not Path(markdown_result.media.path).exists()
+
+    assert cli.main(args) == 0
+
+    assert output.read_text(encoding="utf-8") == render_markdown(markdown_result)
+    assert source.read_bytes() == before
+    assert list(tmp_path.rglob("*.json")) == [source]
+    captured = capsys.readouterr()
+    assert captured.out == f"{output.resolve()}\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("input_kind", ["missing", "malformed", "invalid", "unsupported_schema"])
+def test_export_markdown_invalid_input_preserves_report(tmp_path, capsys, input_kind):
+    source = tmp_path / "input.json"
+    output = source.with_suffix(".md")
+    output.write_text("existing report")
+    values = {
+        "malformed": "not JSON",
+        "invalid": "{}",
+        "unsupported_schema": '{"schema_version":"2.0"}',
+    }
+    if input_kind != "missing":
+        source.write_text(values[input_kind])
+    before = source.read_bytes() if source.exists() else None
+
+    assert cli.main(["export-markdown", str(source)]) == 1
+
+    assert output.read_text() == "existing report"
+    assert (source.read_bytes() if source.exists() else None) == before
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Error:" in captured.err
+
+
+@pytest.mark.parametrize("target", ["json", "video"])
+@pytest.mark.parametrize("alias", [False, True])
+def test_export_markdown_rejects_output_collisions(
+    tmp_path, markdown_result, capsys, target, alias
+):
+    video = Path(markdown_result.media.path)
+    video.write_bytes(b"original video")
+    source = tmp_path / "input.json"
+    source.write_text(render_json(markdown_result), encoding="utf-8")
+    before = source.read_bytes()
+    output = source if target == "json" else video
+    if alias:
+        link = tmp_path / "alias.md"
+        link.symlink_to(output)
+        output = link
+
+    assert cli.main(["export-markdown", str(source), "-o", str(output)]) == 1
+
+    assert source.read_bytes() == before
+    assert video.read_bytes() == b"original video"
+    if alias:
+        assert output.is_symlink()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    label = "JSON" if target == "json" else "video"
+    assert f"Output must not overwrite the input {label}" in captured.err
+
+
+@pytest.mark.parametrize("failure", ["render", "write"])
+def test_export_markdown_failure_preserves_existing_report(
+    tmp_path, markdown_result, monkeypatch, capsys, failure
+):
+    source = tmp_path / "input.json"
+    source.write_text(render_json(markdown_result), encoding="utf-8")
+    before = source.read_bytes()
+    output = source.with_suffix(".md")
+    output.write_text("existing report")
+
+    def fail(*args):
+        raise OSError("Export failed")
+
+    if failure == "render":
+        monkeypatch.setattr(cli, "render_markdown", fail)
+    else:
+        monkeypatch.setattr("video_analyzer.storage.os.replace", fail)
+
+    assert cli.main(["export-markdown", str(source)]) == 1
+
+    assert output.read_text() == "existing report"
+    assert source.read_bytes() == before
+    assert set(tmp_path.iterdir()) == {source, output}
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Error: Export failed" in captured.err
+
+
+def test_export_markdown_help(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["export-markdown", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--output" in help_text
+    assert ".md extension" in help_text
+    assert "No original video, FFmpeg, or models are required" in help_text
