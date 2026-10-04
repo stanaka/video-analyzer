@@ -17,50 +17,208 @@ from .worker_client import Worker
 
 def parser():
     cli = argparse.ArgumentParser(
-        description="Analyze local MP4 videos entirely offline after model preparation."
+        prog="video-analyzer",
+        description="Analyze local MP4 videos entirely offline after model preparation.",
+        epilog="Run video-analyzer COMMAND --help for command options and examples.",
     )
-    cli.add_argument("--version", action="version", version=__version__)
+    cli.add_argument(
+        "--version",
+        action="version",
+        version=__version__,
+        help="Show the application version and exit",
+    )
     commands = cli.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser(
-        "prepare-models", help="Explicitly download models using your hf login"
+        "prepare-models",
+        help="Explicitly download models using your hf login",
+        description="Download and verify model assets using your saved hf login or HF_TOKEN.\n"
+        "This command requires network access; subsequent analysis runs offline.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+        "  video-analyzer prepare-models --profile mac\n"
+        "  video-analyzer prepare-models --profile cuda --asr both --model-dir /data/models",
     )
-    prepare.add_argument("--profile", choices=("mac", "cuda"), required=True)
-    prepare.add_argument("--asr", choices=("whisper", "qwen", "both"), default="whisper")
-    prepare.add_argument("--model-dir", type=Path, default=Path(".models"))
+    prepare.add_argument(
+        "--profile",
+        choices=("mac", "cuda"),
+        required=True,
+        help="Target platform: mac for Apple Silicon, cuda for NVIDIA GPUs (required)",
+    )
+    prepare.add_argument(
+        "--asr",
+        choices=("whisper", "qwen", "both"),
+        default="whisper",
+        help="Speech models to download alongside diarization and vision models (default: %(default)s)",
+    )
+    prepare.add_argument(
+        "--model-dir",
+        type=Path,
+        default=Path(".models"),
+        help="Directory for downloaded models and their manifest (default: %(default)s)",
+    )
     doctor = commands.add_parser(
-        "doctor", help="Check local dependencies and model assets without network access"
+        "doctor",
+        help="Check local dependencies and model assets without network access",
+        description="Check FFmpeg, worker environments, accelerators, and prepared models offline.\n"
+        "Print a JSON diagnostic report; exit with status 1 if any check fails.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+        "  video-analyzer doctor\n"
+        "  video-analyzer doctor --profile mac --asr both --verify-hashes",
     )
-    doctor.add_argument("--profile", choices=("auto", "mac", "cuda", "cpu"), default="auto")
-    doctor.add_argument("--asr", choices=("whisper", "qwen", "both"), default="whisper")
-    doctor.add_argument("--model-dir", type=Path, default=Path(".models"))
-    doctor.add_argument("--runtime-dir", type=Path, default=Path(".runtime"))
-    doctor.add_argument("--verify-hashes", action="store_true")
-    analyze = commands.add_parser("analyze", help="Analyze one local MP4")
-    analyze.add_argument("input", type=Path)
-    analyze.add_argument("--format", choices=("markdown", "json"), default="markdown")
-    analyze.add_argument("-o", "--output", type=Path)
-    analyze.add_argument("--asr", choices=("whisper", "qwen"), default="whisper")
-    analyze.add_argument("--profile", choices=("auto", "mac", "cuda", "cpu"), default="auto")
-    analyze.add_argument("--model-dir", type=Path, default=Path(".models"))
-    analyze.add_argument("--runtime-dir", type=Path, default=Path(".runtime"))
-    analyze.add_argument("--work-dir", type=Path)
-    analyze.add_argument("--resume", action="store_true")
+    doctor.add_argument(
+        "--profile",
+        choices=("auto", "mac", "cuda", "cpu"),
+        default="auto",
+        help="Runtime profile; auto selects mac on Apple Silicon, cuda elsewhere (default: %(default)s)",
+    )
+    doctor.add_argument(
+        "--asr",
+        choices=("whisper", "qwen", "both"),
+        default="whisper",
+        help="Speech model assets to check (default: %(default)s)",
+    )
+    doctor.add_argument(
+        "--model-dir",
+        type=Path,
+        default=Path(".models"),
+        help="Directory containing prepared models and their manifest (default: %(default)s)",
+    )
+    doctor.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=Path(".runtime"),
+        help="Parent directory of the torch and mlx worker environments (default: %(default)s)",
+    )
+    doctor.add_argument(
+        "--verify-hashes",
+        action="store_true",
+        help="Read model files and verify their SHA-256 checksums",
+    )
+    analyze = commands.add_parser(
+        "analyze",
+        help="Analyze one local MP4",
+        description="Transcribe speech, identify speakers, detect scenes, and describe one local MP4\n"
+        "using prepared models offline. Progress goes to stderr; stdout prints the\n"
+        "report path.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+        "  video-analyzer analyze input.mp4\n"
+        "  video-analyzer analyze input.mp4 --asr qwen --format json -o report.json\n"
+        "  video-analyzer analyze input.mp4 --resume --language ja --num-speakers 2",
+    )
+    analyze.add_argument("input", type=Path, help="Path to the local MP4 video")
+    analyze.add_argument(
+        "--format",
+        choices=("markdown", "json"),
+        default="markdown",
+        help="Report output format (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Report path; defaults to INPUT.analysis.md or INPUT.analysis.json beside the video",
+    )
+    analyze.add_argument(
+        "--asr",
+        choices=("whisper", "qwen"),
+        default="whisper",
+        help="Speech recognition backend (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--profile",
+        choices=("auto", "mac", "cuda", "cpu"),
+        default="auto",
+        help="Runtime profile; auto selects mac on Apple Silicon, cuda elsewhere (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--model-dir",
+        type=Path,
+        default=Path(".models"),
+        help="Directory containing prepared models and their manifest (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=Path(".runtime"),
+        help="Parent directory of the torch and mlx worker environments (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--work-dir",
+        type=Path,
+        help="Checkpoint and temporary audio directory (default: .video-analyzer beside the video)",
+    )
+    analyze.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse completed checkpoints matching the input, settings, and models",
+    )
     analyze.add_argument("--language", help="Spoken language; omitted means automatic detection")
-    analyze.add_argument("--report-language", choices=("ja", "en"), default="ja")
-    analyze.add_argument("--num-speakers", type=int)
-    analyze.add_argument("--audio-stream", type=int, default=0)
-    analyze.add_argument("--scene-threshold", type=float, default=3.0)
-    analyze.add_argument("--min-scene-seconds", type=float, default=0.5)
-    analyze.add_argument("--audio-device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
-    analyze.add_argument("--diarization-device", choices=("auto", "cpu", "cuda"), default="auto")
-    analyze.add_argument("--vision-device", choices=("auto", "cpu", "cuda"), default="auto")
-    analyze.add_argument("--frames-per-window", type=int, default=8)
-    analyze.add_argument("--window-seconds", type=float, default=30)
+    analyze.add_argument(
+        "--report-language",
+        choices=("ja", "en"),
+        default="ja",
+        help="Language of report headings and visual descriptions (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--num-speakers",
+        type=int,
+        help="Known speaker count, at least 1; omitted means automatic estimation",
+    )
+    analyze.add_argument(
+        "--audio-stream",
+        type=int,
+        default=0,
+        help="Zero-based audio stream ordinal, not container stream index (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--scene-threshold",
+        type=float,
+        default=3.0,
+        help="Positive adaptive scene cut detection threshold (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--min-scene-seconds",
+        type=float,
+        default=0.5,
+        help="Positive minimum spacing between scene cuts in seconds (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--audio-device",
+        choices=("auto", "cpu", "mps", "cuda"),
+        default="auto",
+        help="Speech recognition device; auto allows CPU fallback for MPS failures (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--diarization-device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Speaker diarization device; auto uses CPU on Mac, CUDA on the cuda profile (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--vision-device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="Vision device; auto uses MLX/Metal on Mac, CPU/CUDA overrides use PyTorch (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--frames-per-window",
+        type=int,
+        default=8,
+        help="Maximum chronological frames per description window, from 1 to 8 (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--window-seconds",
+        type=float,
+        default=30,
+        help="Positive description window length in seconds, at most 30 (default: %(default)s)",
+    )
     analyze.add_argument(
         "--worker-timeout",
         type=float,
         default=3600,
-        help="Seconds allowed without worker progress (default: 3600)",
+        help="Positive seconds allowed without worker progress (default: %(default)s)",
     )
     return cli
 

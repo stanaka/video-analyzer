@@ -34,14 +34,17 @@ run = "uv sync --frozen"
 # or download models implicitly. Arguments are forwarded to the underlying CLI.
 [tasks.prepare-models]
 description = "Explicitly download models using the saved hf login; pass --profile mac or cuda"
+raw_args = true
 run = ".venv/bin/video-analyzer prepare-models"
 
 [tasks.doctor]
 description = "Check local models, workers, FFmpeg, and accelerators offline"
+raw_args = true
 run = ".venv/bin/video-analyzer doctor"
 
 [tasks.analyze]
 description = "Analyze a local MP4 offline; pass the input path and CLI options"
+raw_args = true
 run = ".venv/bin/video-analyzer analyze"
 
 [tasks.test]

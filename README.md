@@ -93,8 +93,20 @@ mise run analyze input.mp4 --asr qwen --format json -o report.json
 mise run analyze input.mp4 --resume
 mise run analyze input.mp4 --language ja --num-speakers 2
 mise run analyze input.mp4 --report-language en --audio-stream 1
-mise run analyze -- --help
+mise run analyze --help
 ```
+
+Each CLI command accepts `-h` or `--help` to show its options, defaults, and examples
+without running the command:
+
+```bash
+mise run prepare-models --help
+mise run doctor --help
+mise run analyze --help
+```
+
+With the virtual environment activated, use `video-analyzer --help` for the
+command list, or `video-analyzer COMMAND --help` for the same command-specific help.
 
 The default output is `input.analysis.md` beside the video, or
 `input.analysis.json` with `--format json`. Progress goes to stderr; stdout
