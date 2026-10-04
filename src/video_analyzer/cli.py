@@ -106,6 +106,7 @@ def parser():
         "  video-analyzer analyze input.mp4\n"
         "  video-analyzer analyze input.mp4 --asr qwen --format json -o report.json\n"
         "  video-analyzer analyze input.mp4 --resume --language ja --num-speakers 2\n"
+        "  video-analyzer analyze input.mp4 --audio-normalization dynamic --noise-reduction\n"
         "  video-analyzer analyze input.mp4 --no-diarization --no-scene-description\n"
         "  video-analyzer analyze input.mp4 --no-transcription --no-diarization",
     )
@@ -191,6 +192,18 @@ def parser():
         type=int,
         default=0,
         help="Zero-based audio stream ordinal, not container stream index (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--audio-normalization",
+        choices=("off", "peak", "dynamic"),
+        default="off",
+        help="Normalize audio before transcription and diarization: peak adjusts the whole recording to -3 dBFS; dynamic gently balances quiet and loud passages (default: %(default)s)",
+    )
+    analyze.add_argument(
+        "--noise-reduction",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Conservatively reduce rumble and background noise before audio normalization and analysis (default: disabled)",
     )
     analyze.add_argument(
         "--scene-threshold",

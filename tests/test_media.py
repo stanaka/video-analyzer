@@ -24,7 +24,9 @@ def test_cuts_and_frame_sampling(video, tmp_path):
         assert all(start <= time < end for time in pts)
 
 
-def test_audio_pts_offset_and_no_cuts(tmp_path, ffmpeg):
+@pytest.mark.parametrize("normalization", ["off", "peak", "dynamic"])
+@pytest.mark.parametrize("noise_reduction", [False, True])
+def test_audio_pts_offset_and_no_cuts(tmp_path, ffmpeg, normalization, noise_reduction):
     path = tmp_path / "delayed.mp4"
     ffmpeg(
         "-f",
@@ -47,7 +49,7 @@ def test_audio_pts_offset_and_no_cuts(tmp_path, ffmpeg):
     assert media.audio_start > 0.8
     assert len(detect_scenes(media, 3, 0.5)) == 1
     wav = tmp_path / "audio.wav"
-    extract_audio(media, wav)
+    extract_audio(media, wav, audio_normalization=normalization, noise_reduction=noise_reduction)
     with wave.open(str(wav)) as stream:
         assert stream.getframerate() == 16000
         assert stream.getnchannels() == 1

@@ -22,6 +22,8 @@ class AnalysisConfig(Record):
     report_language: Literal["ja", "en"] = "ja"
     num_speakers: int | None = Field(default=None, ge=1)
     audio_stream: int = Field(default=0, ge=0, description="Zero-based audio stream ordinal")
+    audio_normalization: Literal["off", "peak", "dynamic"] = "off"
+    noise_reduction: bool = False
     scene_threshold: float = Field(default=3.0, gt=0)
     min_scene_seconds: float = Field(default=0.5, gt=0)
     audio_device: Literal["auto", "cpu", "mps", "cuda"] = "auto"

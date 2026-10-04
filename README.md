@@ -93,6 +93,7 @@ mise run analyze input.mp4 --asr qwen --format json -o report.json
 mise run analyze input.mp4 --resume
 mise run analyze input.mp4 --language ja --num-speakers 2
 mise run analyze input.mp4 --report-language en --audio-stream 1
+mise run analyze input.mp4 --audio-normalization dynamic --noise-reduction
 mise run analyze input.mp4 --no-diarization --no-scene-description
 mise run analyze input.mp4 --no-transcription --no-diarization
 mise run analyze --help
@@ -126,6 +127,8 @@ after all stages succeed. Existing reports are preserved on failure.
 | `--report-language` | `ja` | Japanese or English headings/descriptions |
 | `--num-speakers` | automatic | Optional known speaker count |
 | `--audio-stream` | `0` | Zero-based audio stream ordinal, not container stream index |
+| `--audio-normalization` | `off` | `off`, `peak` for one gain adjustment across the recording, or `dynamic` to balance quiet and loud passages |
+| `--noise-reduction` / `--no-noise-reduction` | disabled | Reduce rumble and background noise before normalization and audio analysis |
 | `--scene-threshold` | `3.0` | Adaptive cut detection sensitivity |
 | `--min-scene-seconds` | `0.5` | Minimum spacing between cuts |
 | `--window-seconds` | `30` | Description window length, maximum 30 seconds |
@@ -150,6 +153,56 @@ scene boundaries without requiring any prepared models or model workers.
 Markdown reports list the enabled features and omit disabled content sections;
 JSON retains its existing fields, with empty lists for disabled outputs.
 
+### Audio preprocessing
+
+Normalization and noise reduction are optional and independent. Both default to
+off. They run locally through FFmpeg before speaker identification and
+transcription, using the same processed audio for Whisper or Qwen and diarization.
+They preserve the video-relative timing and produce mono 16 kHz, 16-bit PCM.
+No additional models or dependencies are needed. When there is no audio track,
+or both transcription and diarization are disabled, preprocessing is skipped.
+
+```bash
+# One gain adjustment for the entire recording, including recordings lasting hours.
+mise run analyze input.mp4 --audio-normalization peak
+
+# Gradually balance quieter and louder passages, optionally reducing noise first.
+mise run analyze input.mp4 --audio-normalization dynamic
+mise run analyze input.mp4 --audio-normalization dynamic --noise-reduction
+
+# Reduce noise without normalizing, or explicitly disable both features.
+mise run analyze input.mp4 --audio-normalization off --noise-reduction
+mise run analyze input.mp4 --audio-normalization off --no-noise-reduction
+```
+
+`peak` makes two passes: it measures the highest sample peak after any noise
+reduction, then applies one constant gain to reach -3 dBFS. Quiet and loud
+passages retain their relative levels, and a single loud moment limits the gain
+for the whole recording. Digital silence remains silent.
+
+`dynamic` uses FFmpeg's
+[`dynaudnorm`](https://ffmpeg.org/ffmpeg-filters.html#dynaudnorm) with 500 ms frames
+and a 31-frame smoothing window (about 15.5 seconds). It gradually balances
+longer quiet and loud passages, targeting a -3 dBFS peak with amplification
+limited to 20 dB. A -60 dBFS threshold limits amplification of very quiet
+background noise; additional compression and RMS targeting are disabled.
+Smoothing, the gain limit, and the threshold mean every passage will not reach
+the target. Processing uses one streaming pass with bounded buffering, retaining
+filter state throughout the recording instead of restarting at ASR chunk boundaries.
+
+Noise reduction applies an 80 Hz high-pass filter followed by conservative FFT
+denoising (`afftdn=nr=10:nf=-50:tn=1:gs=5`), with a 10 dB reduction setting,
+automatic noise-floor tracking, and gain smoothing. It runs before normalization;
+its delay is compensated and the audio tail is preserved. All processing
+parameters are fixed in this version.
+
+As the [noisy-audio guide](https://vocova.app/blog/transcribe-noisy-audio)
+recommends, compare transcription of a representative sample with and without
+denoising: cleaner-sounding audio does not always improve recognition. The
+selected mode and noise-reduction flag are recorded in JSON
+`provenance.configuration`. Changing either uses a separate checkpoint directory;
+`--resume` reuses work only for matching settings.
+
 ## Python API
 
 ```python
@@ -164,6 +217,12 @@ Path("report.json").write_text(render_json(result), encoding="utf-8")
 result = analyze_video(
     Path("input.mp4"),
     AnalysisConfig(transcription=True, diarization=False, scene_description=False),
+)
+
+# Dynamically balance volume and reduce noise before audio analysis.
+result = analyze_video(
+    Path("input.mp4"),
+    AnalysisConfig(audio_normalization="dynamic", noise_reduction=True),
 )
 ```
 

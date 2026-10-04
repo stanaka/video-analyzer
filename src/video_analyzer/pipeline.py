@@ -108,8 +108,13 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                 or not audio_path.is_file()
                 or audio_path.stat().st_size != saved_audio["size"]
             ):
-                progress("Extracting normalized audio")
-                extract_audio(media, audio_path)
+                extract_audio(
+                    media,
+                    audio_path,
+                    audio_normalization=config.audio_normalization,
+                    noise_reduction=config.noise_reduction,
+                    progress=progress,
+                )
                 cache.put("audio", {"size": audio_path.stat().st_size})
             if config.diarization:
                 diarization = cache.get("diarization")

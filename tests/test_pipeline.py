@@ -2,6 +2,7 @@ import itertools
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import video_analyzer.pipeline as pipeline
 from video_analyzer.cli import main, parser
@@ -103,7 +104,7 @@ def simulated_media(monkeypatch, tmp_path):
         calls["scenes"] += 1
         return [Scene(id="scene_0001", start=0, end=25), Scene(id="scene_0002", start=25, end=55)]
 
-    def audio(_, target):
+    def audio(_, target, **options):
         calls["audio"] += 1
         target.write_bytes(b"fixture audio")
 
@@ -470,6 +471,8 @@ def test_cli_feature_defaults_and_help(capsys):
     args = parser().parse_args(["analyze", "input.mp4"])
     assert all(getattr(args, feature) is True for feature in FEATURES)
     assert all(getattr(AnalysisConfig(), feature) is True for feature in FEATURES)
+    assert args.audio_normalization == AnalysisConfig().audio_normalization == "off"
+    assert args.noise_reduction is AnalysisConfig().noise_reduction is False
     with pytest.raises(SystemExit) as exited:
         main(["analyze", "--help"])
     assert exited.value.code == 0
@@ -477,3 +480,172 @@ def test_cli_feature_defaults_and_help(capsys):
     for feature in FEATURES:
         flag = feature.replace("_", "-")
         assert f"--{flag}" in help_text and f"--no-{flag}" in help_text
+    assert "--audio-normalization {off,peak,dynamic}" in help_text
+    assert "--noise-reduction" in help_text and "--no-noise-reduction" in help_text
+
+
+AUDIO_PROCESSING = list(itertools.product(("off", "peak", "dynamic"), (False, True)))
+
+
+@pytest.mark.parametrize("normalization,noise_reduction", AUDIO_PROCESSING)
+def test_cli_audio_processing_reaches_api(normalization, noise_reduction, monkeypatch, tmp_path):
+    import video_analyzer.cli as cli
+
+    def capture(_, config):
+        assert config.audio_normalization == normalization
+        assert config.noise_reduction is noise_reduction
+        raise AnalysisError("Stop after checking configuration")
+
+    monkeypatch.setattr(cli, "analyze_video", capture)
+    assert (
+        main(
+            [
+                "analyze",
+                "input.mp4",
+                "-o",
+                str(tmp_path / "report.md"),
+                "--audio-normalization",
+                normalization,
+                "--noise-reduction" if noise_reduction else "--no-noise-reduction",
+            ]
+        )
+        == 1
+    )
+
+
+def test_invalid_audio_normalization():
+    with pytest.raises(ValidationError, match="audio_normalization"):
+        AnalysisConfig(audio_normalization="loudness")
+    with pytest.raises(SystemExit) as exited:
+        parser().parse_args(["analyze", "input.mp4", "--audio-normalization", "loudness"])
+    assert exited.value.code == 2
+
+
+@pytest.mark.parametrize("normalization,noise_reduction", AUDIO_PROCESSING)
+@pytest.mark.parametrize("asr", ["whisper", "qwen"])
+def test_shared_processed_audio_and_resume(
+    normalization, noise_reduction, asr, simulated_media, fake_models, monkeypatch, tmp_path
+):
+    path, media, calls = simulated_media
+    fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
+    extracted = []
+    original_extract = pipeline.extract_audio
+
+    def extract(media, target, **options):
+        assert options["audio_normalization"] == normalization
+        assert options["noise_reduction"] is noise_reduction
+        extracted.append(str(target.resolve()))
+        original_extract(media, target, **options)
+
+    monkeypatch.setattr(pipeline, "extract_audio", extract)
+    config = AnalysisConfig(
+        profile="cpu",
+        asr=asr,
+        scene_description=False,
+        work_dir=tmp_path / "work",
+        audio_normalization=normalization,
+        noise_reduction=noise_reduction,
+    )
+    result = pipeline.analyze_video(path, config)
+    audio_requests = [
+        payload["audio"]
+        for operation, payload in fake_models.requests
+        if operation in ("diarize", "transcribe")
+    ]
+    assert len(extracted) == 1 and audio_requests == extracted * 4
+    assert result.provenance["configuration"]["audio_normalization"] == normalization
+    assert result.provenance["configuration"]["noise_reduction"] is noise_reduction
+    assert AnalysisResult.model_validate_json(render_json(result)) == result
+    requests = fake_models.requests.copy()
+    pipeline.analyze_video(path, config.model_copy(update={"resume": True}))
+    assert calls["audio"] == 1 and fake_models.requests == requests
+
+
+def test_audio_processing_modes_have_separate_resumable_caches(
+    simulated_media, fake_models, tmp_path
+):
+    path, media, calls = simulated_media
+    fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
+    work = tmp_path / "work"
+    configs = [
+        AnalysisConfig(
+            profile="cpu",
+            scene_description=False,
+            work_dir=work,
+            resume=True,
+            audio_normalization=mode,
+            noise_reduction=noise,
+        )
+        for mode, noise in AUDIO_PROCESSING
+    ]
+    for config in configs:
+        pipeline.analyze_video(path, config)
+    assert len(list(work.glob("*/audio.json"))) == len(configs)
+    assert calls["audio"] == len(configs)
+    requests = fake_models.requests.copy()
+    for config in reversed(configs):
+        pipeline.analyze_video(path, config)
+    assert calls["audio"] == len(configs) and fake_models.requests == requests
+
+
+@pytest.mark.parametrize("normalization,noise_reduction", AUDIO_PROCESSING)
+@pytest.mark.parametrize("has_audio", [False, True])
+def test_unused_audio_processing_is_skipped(
+    normalization, noise_reduction, has_audio, simulated_media, fake_models, tmp_path
+):
+    path, media, calls = simulated_media
+    if not has_audio:
+        media.audio_stream_index = media.audio_start = None
+    # Either audio is absent, or both audio consumers are disabled.
+    config = AnalysisConfig(
+        profile="cpu",
+        scene_description=False,
+        transcription=not has_audio,
+        diarization=not has_audio,
+        work_dir=tmp_path / "work",
+        audio_normalization=normalization,
+        noise_reduction=noise_reduction,
+    )
+    pipeline.analyze_video(path, config)
+    assert calls["audio"] == 0 and not fake_models.requests
+
+
+def test_audio_processing_failure_preserves_report_and_resumes(
+    simulated_media, fake_models, monkeypatch, tmp_path
+):
+    path, media, calls = simulated_media
+    fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
+    original_extract = pipeline.extract_audio
+    attempts = 0
+
+    def extract(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise AnalysisError("Audio processing failed")
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "extract_audio", extract)
+    output, work = tmp_path / "report.md", tmp_path / "work"
+    output.write_text("Existing report")
+    args = [
+        "analyze",
+        str(path),
+        "--profile",
+        "cpu",
+        "--work-dir",
+        str(work),
+        "-o",
+        str(output),
+        "--audio-normalization",
+        "dynamic",
+        "--noise-reduction",
+        "--no-scene-description",
+    ]
+    assert main(args) == 1
+    assert output.read_text() == "Existing report"
+    assert not list(work.glob("*/audio.json")) and not fake_models.requests
+    assert main([*args, "--resume"]) == 0
+    assert attempts == 2 and calls["scenes"] == 1
+    assert len(list(work.glob("*/audio.json"))) == 1
+    assert "word" in output.read_text()
