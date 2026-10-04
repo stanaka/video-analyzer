@@ -349,11 +349,12 @@ def test_tuning_preserves_defaults_and_does_not_enforce_search_ranges():
         {"pyannote": {"segmentation": {"min_duration_off": 0.0}}},
     ],
 )
-def test_sortformer_rejects_overrides_only_when_enabled(options):
+@pytest.mark.parametrize("backend", ["sortformer", "nemotron"])
+def test_nemo_rejects_overrides_only_when_enabled(options, backend):
     with pytest.raises(ValidationError, match="select the pyannote"):
-        AnalysisConfig(diarization_backend="sortformer", **options)
-    assert AnalysisConfig(diarization_backend="sortformer", diarization=False, **options)
-    assert AnalysisConfig(diarization_backend="sortformer", pyannote={})
+        AnalysisConfig(diarization_backend=backend, **options)
+    assert AnalysisConfig(diarization_backend=backend, diarization=False, **options)
+    assert AnalysisConfig(diarization_backend=backend, pyannote={})
 
 
 def test_help_documents_configuration_and_overrides(capsys):

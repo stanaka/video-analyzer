@@ -152,7 +152,7 @@ print(json.dumps(event), flush=True)
             worker.request("diarize")
 
 
-@pytest.mark.parametrize("kind", ["diarization", "sortformer"])
+@pytest.mark.parametrize("kind", ["diarization", "sortformer", "nemotron"])
 def test_server_progress_keeps_protocol_ids_and_redirects_model_prints(monkeypatch, capsys, kind):
     def diarize(*, audio, progress):
         assert audio == "input.wav"
@@ -186,9 +186,10 @@ def test_server_progress_keeps_protocol_ids_and_redirects_model_prints(monkeypat
     assert output.err == "model diagnostic\n"
 
 
-def test_sortformer_import_failure_reaches_client(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["sortformer", "nemotron"])
+def test_nemo_import_failure_reaches_client(monkeypatch, tmp_path, backend):
     # The standard CLI interpreter intentionally has no optional NeMo install.
     monkeypatch.setattr(client, "worker_python", lambda *_: Path(sys.executable))
-    with client.Worker(tmp_path, "sortformer", timeout=10) as worker:
-        with pytest.raises(AnalysisError, match="setup:sortformer"):
-            worker.request("capabilities", check_backend="sortformer")
+    with client.Worker(tmp_path, backend, timeout=10) as worker:
+        with pytest.raises(AnalysisError, match=f"setup:{backend}"):
+            worker.request("capabilities", check_backend=backend)

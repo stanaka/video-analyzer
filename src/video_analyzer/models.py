@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .diarization import DIARIZATION_MODELS, NEMO_DIARIZERS, selected_diarizers
 from .errors import AnalysisError
 from .storage import atomic_json, file_hash, read_json
 
@@ -14,11 +15,12 @@ MODEL_REPOS = {
     "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
     "diarization": "pyannote/speaker-diarization-community-1",
     "sortformer": "nvidia/diar_streaming_sortformer_4spk-v2.1",
+    "nemotron": "nvidia/Nemotron-3-Diarization",
     "molmo-mlx": "mlx-community/Molmo2-8B-4bit",
     "molmo-torch": "allenai/Molmo2-8B",
 }
-SORTFORMER_CHECKPOINT = "diar_streaming_sortformer_4spk-v2.1.nemo"
-DIARIZATION_MODELS = {"pyannote": "diarization", "sortformer": "sortformer"}
+SORTFORMER_CHECKPOINT = NEMO_DIARIZERS["sortformer"].checkpoint
+NEMOTRON_CHECKPOINT = NEMO_DIARIZERS["nemotron"].checkpoint
 PATTERNS = [
     "*.json",
     "*.yaml",
@@ -53,9 +55,7 @@ def required_models(
     result = ["molmo-mlx" if profile == "mac" else "molmo-torch"] if scene_description else []
     if audio and diarization:
         result.extend(
-            DIARIZATION_MODELS.values()
-            if diarization_backend == "both"
-            else [DIARIZATION_MODELS[diarization_backend]]
+            DIARIZATION_MODELS[backend] for backend in selected_diarizers(diarization_backend)
         )
     if audio and transcription:
         if asr in ("whisper", "both"):
@@ -96,8 +96,8 @@ def prepare_models(
             patterns = PATTERNS + (
                 ["*.bin", "*.npz", "*.pt", "*.ckpt"] if key == "diarization" else []
             )
-            if key == "sortformer":
-                patterns = [SORTFORMER_CHECKPOINT, "README.md"]
+            if key in NEMO_DIARIZERS:
+                patterns = [NEMO_DIARIZERS[key].checkpoint, "README.md"]
             expected = [
                 s
                 for s in info.siblings
@@ -107,8 +107,10 @@ def prepare_models(
             ]
             if not expected:
                 raise AnalysisError(f"No model files found for {repo}")
-            if key == "sortformer" and SORTFORMER_CHECKPOINT not in {s.rfilename for s in expected}:
-                raise AnalysisError(f"Missing {SORTFORMER_CHECKPOINT} in {repo}")
+            if key in NEMO_DIARIZERS and NEMO_DIARIZERS[key].checkpoint not in {
+                s.rfilename for s in expected
+            }:
+                raise AnalysisError(f"Missing {NEMO_DIARIZERS[key].checkpoint} in {repo}")
             # On updates use a fresh directory. Existing checkpoints can still resolve
             # their old snapshot and an interrupted download cannot corrupt it.
             previous = manifest["models"].get(key)
@@ -179,14 +181,19 @@ def local_models(root: Path, required: list[str], *, verify_hashes=False) -> dic
                 f"Model {key} is not prepared. Run prepare-models with the requested ASR/profile "
                 "and --diarization-backend."
             )
-        if key == "sortformer" and (
+        if key in NEMO_DIARIZERS and (
             entry.get("repo_id") != MODEL_REPOS[key]
-            or SORTFORMER_CHECKPOINT not in entry["files"]
-            or entry["files"][SORTFORMER_CHECKPOINT].get("size", 0) <= 0
+            or NEMO_DIARIZERS[key].checkpoint not in entry["files"]
+            or entry["files"][NEMO_DIARIZERS[key].checkpoint].get("size", 0) <= 0
         ):
+            label = (
+                "Sortformer requires the NVIDIA v2.1"
+                if key == "sortformer"
+                else "Nemotron 3 requires the NVIDIA"
+            )
             raise AnalysisError(
-                f"Sortformer requires the NVIDIA v2.1 checkpoint {SORTFORMER_CHECKPOINT}. "
-                "Run prepare-models --diarization-backend sortformer."
+                f"{label} checkpoint {NEMO_DIARIZERS[key].checkpoint}. "
+                f"Run prepare-models --diarization-backend {key}."
             )
         directory = (root / entry["path"]).resolve()
         if not directory.is_relative_to(root):

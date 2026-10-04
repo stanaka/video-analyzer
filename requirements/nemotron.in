@@ -1,0 +1,6 @@
+# Isolated Nemotron runtime; published NeMo 3.0.0 lacks high-resolution support.
+nemo-toolkit[asr] @ https://github.com/NVIDIA-NeMo/Speech/archive/1688cc3d6a9ade854f544987810c53f605dc86fc.tar.gz
+torch==2.8.0
+torchaudio==2.8.0
+librosa==0.11.0
+pydantic>=2.11,<3

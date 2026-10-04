@@ -5,7 +5,7 @@ and visual descriptions. After explicit model preparation, analysis runs locally
 without downloads or hosted inference services.
 
 - **Speech:** Whisper large-v3 (default), or Qwen3-ASR-1.7B with Qwen3-ForcedAligner-0.6B.
-- **Speakers:** pyannote `speaker-diarization-community-1` (default), or NVIDIA Sortformer v2.1, retaining overlapping and exclusive turns.
+- **Speakers:** pyannote `speaker-diarization-community-1` (default), NVIDIA Sortformer v2.1, or NVIDIA Nemotron 3 Diarization, retaining overlapping and exclusive turns.
 - **Scenes:** PySceneDetect's adaptive detector, using presentation timestamps for variable frame rates.
 - **Descriptions:** Molmo2-8B, using a 4-bit MLX conversion on Apple Silicon and original weights on CUDA.
 - **Reports:** Markdown or JSON. Japanese headings/descriptions and original-language speech by default.
@@ -14,7 +14,7 @@ without downloads or hosted inference services.
 
 Use [mise](https://mise.jdx.dev/getting-started.html) and FFmpeg including `ffprobe`.
 The project's `mise.toml` pins Python 3.11.15 (default), Python 3.12.15 for the
-optional Sortformer worker, and uv 0.12.11; `mise.lock` records
+optional Sortformer and Nemotron workers, and uv 0.12.11; `mise.lock` records
 download URLs and checksums for Apple Silicon and Linux x86_64. Use mise
 2026.9.16 or newer, and run these commands from the repository.
 
@@ -144,6 +144,58 @@ uses a separate analysis cache, including transcription results.
 `--no-diarization` and videos without audio require neither diarizer's assets nor
 its worker environment, regardless of the selected backend.
 
+### Optional Nemotron 3 diarization
+
+Install the separate NVIDIA runtime and explicitly prepare its checkpoint:
+
+```bash
+mise install --locked
+mise run setup:nemotron
+mise run prepare-models --profile mac --diarization-backend nemotron
+mise run doctor --profile mac --diarization-backend nemotron --verify-hashes
+mise run analyze input.mp4 --diarization-backend nemotron
+# Or load the dedicated configuration:
+mise run analyze input.mp4 --config examples/analysis_nemotron.yaml
+```
+
+Use `--profile cuda` on Linux CUDA. For Linux CPU inference, prepare with
+`--profile cuda`, then select `--profile cpu` for `doctor` and `analyze`.
+Nemotron uses CPU on Apple Silicon and CPU/CUDA on Linux, with a maximum of
+**eight speakers**. Omit speaker-count constraints and pyannote tuning when it is
+enabled. Python 3.11 remains the CLI default; this optional environment uses
+Python **3.12.15**, PyTorch/torchaudio **2.8.0**, and a NeMo source build reporting
+version **3.1.0**. It has its own hash locks and does not change the existing workers.
+
+The published NeMo 3.0.0 package predates the required high-resolution model
+support. The runtime pins NVIDIA's source archive at revision
+`1688cc3d6a9ade854f544987810c53f605dc86fc`, with its archive hash recorded in
+both platform locks. Offline diagnostics verify the source revision and required
+NeMo APIs. Normal setup and pyannote/Sortformer diagnostics do not require this
+optional environment.
+
+Preparation downloads NVIDIA's original
+[`Nemotron-3-Diarization.nemo`](https://huggingface.co/nvidia/Nemotron-3-Diarization)
+checkpoint and README into a separate `nemotron` manifest entry, with the resolved
+model revision, size, and SHA-256. Preparing Nemotron retains previously prepared
+models. The existing `--diarization-backend both` continues to select pyannote and
+Sortformer v2.1; prepare and check Nemotron separately using `nemotron`.
+
+One complete recording uses NeMo's streaming state with batch size one and no
+data-loader subprocesses. Its recording preset uses chunk length 340, right
+context 40, FIFO length 40, speaker cache length **264**, and cache update period
+300, measured in **80 ms encoder frames**. Returned speaker probabilities use
+**10 ms output frames**, including progress timing and exclusive-timeline
+derivation. Configured/effective cache settings, output stride, runtime versions,
+and the pinned source revision are recorded in provenance. Changes to that source
+revision or adapter settings invalidate Nemotron analysis checkpoints.
+
+The regular timeline preserves overlap using NeMo's default postprocessing. The
+exclusive timeline chooses the highest-probability active speaker in each 10 ms
+frame, breaking ties by lower model speaker index, preserving silence and partial
+frames, and clipping to the original duration. Reports and transcript assignment
+use the same schema as the existing backends. Disabled diarization and videos
+without audio require neither the Nemotron checkpoint nor its runtime.
+
 ## Analyze
 
 ```bash
@@ -186,11 +238,11 @@ after all stages succeed. Existing reports are preserved on failure.
 | `--diarization` / `--no-diarization` | enabled | Enable or disable speaker identification |
 | `--scene-description` / `--no-scene-description` | enabled | Enable or disable visual descriptions; scene detection always runs |
 | `--asr` | `whisper` | Whisper or Qwen |
-| `--diarization-backend` | `pyannote` | Community-1 or pretrained Sortformer v2.1 (maximum four speakers) |
+| `--diarization-backend` | `pyannote` | Community-1, pretrained Sortformer v2.1 (maximum four speakers), or Nemotron 3 (maximum eight speakers) |
 | `--profile` | `auto` | MLX on Apple Silicon; CUDA elsewhere. Explicit `cpu` is available for large-memory hosts. |
 | `--language` | automatic | Spoken language hint, such as `ja` or `en`; no translation |
 | `--report-language` | `ja` | Japanese or English headings/descriptions |
-| `--num-speakers` | automatic | Optional known speaker count for pyannote; overrides min/max bounds; rejected with enabled Sortformer diarization |
+| `--num-speakers` | automatic | Optional known speaker count for pyannote; overrides min/max bounds; rejected with enabled Sortformer or Nemotron diarization |
 | `--min-speakers` / `--max-speakers` | automatic | Optional positive lower/upper speaker-count bounds for pyannote |
 | `--pyannote-clustering-threshold` | model default | Nonnegative threshold for initial clustering before VBx refinement |
 | `--pyannote-clustering-fa` | model default | Positive VBx acoustic-evidence scale (`Fa`) |
@@ -207,7 +259,7 @@ after all stages succeed. Existing reports are preserved on failure.
 | `--diarization-device` | `auto` | CPU on Mac, CUDA on the CUDA profile |
 | `--vision-device` | `auto` | MLX/Metal on Mac; CPU/CUDA overrides for PyTorch vision |
 | `--model-dir` | `.models` | Prepared models |
-| `--runtime-dir` | `.runtime` | Parent of `torch`, `mlx`, and optional `sortformer` environments |
+| `--runtime-dir` | `.runtime` | Parent of `torch`, `mlx`, and optional `sortformer`/`nemotron` environments |
 | `--work-dir` | `.video-analyzer` beside input | Checkpoints and temporary audio |
 | `--worker-timeout` | `3600` | Seconds allowed without worker progress; diarization batch progress resets the timer |
 
@@ -278,7 +330,7 @@ takes precedence over both bounds; otherwise `min_speakers` must not exceed
 `max_speakers`. All tuning values must be finite. `Fa` and `Fb` must be positive;
 the threshold and pause duration may be zero. Validation does not restrict
 values to pyannote's suggested optimization search ranges. Count constraints and
-pyannote tuning are rejected when Sortformer diarization is enabled, but can
+pyannote tuning are rejected when Sortformer or Nemotron diarization is enabled, but can
 remain in a configuration when diarization is disabled.
 
 Tuning values in the example are starting points for experiments, not a preset

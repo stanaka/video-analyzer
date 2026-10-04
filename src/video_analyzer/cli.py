@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from . import __version__, analyze_video
 from .config import load_settings, merge_settings
+from .diarization import NEMO_DIARIZERS, selected_diarizers
 from .errors import AnalysisError
 from .media import prerequisites
 from .models import local_models, prepare_models, required_models, resolve_profile
@@ -97,7 +98,7 @@ def parser(*, sparse=False):
         "--runtime-dir",
         type=Path,
         default=Path(".runtime"),
-        help="Parent directory of the torch, mlx, and optional sortformer worker environments (default: %(default)s)",
+        help="Parent directory of the torch, mlx, and optional sortformer/nemotron worker environments (default: %(default)s)",
     )
     doctor.add_argument(
         "--verify-hashes",
@@ -183,7 +184,7 @@ def parser(*, sparse=False):
         "--runtime-dir",
         type=Path,
         default=Path(".runtime"),
-        help="Parent directory of the torch, mlx, and optional sortformer worker environments (default: %(default)s)",
+        help="Parent directory of the torch, mlx, and optional sortformer/nemotron worker environments (default: %(default)s)",
     )
     analyze.add_argument(
         "--work-dir",
@@ -206,7 +207,7 @@ def parser(*, sparse=False):
     analyze.add_argument(
         "--num-speakers",
         type=int,
-        help="Known speaker count for pyannote, at least 1; overrides min/max-speakers; omit when using Sortformer",
+        help="Known speaker count for pyannote, at least 1; overrides min/max-speakers; omit when using Sortformer or Nemotron",
     )
     for bound in ("min", "max"):
         analyze.add_argument(
@@ -289,11 +290,11 @@ def parser(*, sparse=False):
     for command in (prepare, doctor, analyze):
         command.add_argument(
             "--diarization-backend",
-            choices=("pyannote", "sortformer")
+            choices=("pyannote", "sortformer", "nemotron")
             if command is analyze
-            else ("pyannote", "sortformer", "both"),
+            else ("pyannote", "sortformer", "nemotron", "both"),
             default="pyannote",
-            help="Speaker diarization backend; sortformer is NVIDIA v2.1, automatically estimates up to four speakers, and does not accept --num-speakers (default: %(default)s)",
+            help="Speaker diarization backend; sortformer is NVIDIA v2.1 (up to four speakers), nemotron is NVIDIA Nemotron 3 (up to eight). Both NVIDIA backends estimate counts automatically; omit speaker counts and pyannote tuning. On prepare-models/doctor, both selects pyannote and Sortformer v2.1 (default: %(default)s)",
         )
     if sparse:
         # Only supplied analysis flags should override YAML. Keep the public
@@ -319,12 +320,15 @@ def diagnose(args) -> int:
         if not path:
             report["errors"].append(f"Missing {name}")
     worker_kinds = ["torch", "mlx"] if profile == "mac" else ["torch"]
-    if args.diarization_backend in ("sortformer", "both"):
-        worker_kinds.append("sortformer")
+    worker_kinds.extend(
+        backend
+        for backend in selected_diarizers(args.diarization_backend)
+        if backend in NEMO_DIARIZERS
+    )
     for kind in worker_kinds:
         try:
             with Worker(args.runtime_dir, kind, timeout=120) as worker:
-                options = {"check_backend": "sortformer"} if kind == "sortformer" else {}
+                options = {"check_backend": kind} if kind in NEMO_DIARIZERS else {}
                 report["workers"][kind] = worker.request("capabilities", **options)
         except AnalysisError as exc:
             report["errors"].append(str(exc))
@@ -332,12 +336,14 @@ def diagnose(args) -> int:
         report["errors"].append("CUDA is unavailable")
     if profile == "mac" and not report["workers"].get("mlx", {}).get("metal"):
         report["errors"].append("MLX Metal is unavailable")
-    if (
-        profile == "cuda"
-        and "sortformer" in worker_kinds
-        and not report["workers"].get("sortformer", {}).get("cuda")
-    ):
-        report["errors"].append("CUDA is unavailable in the Sortformer worker")
+    for kind in worker_kinds:
+        if (
+            profile == "cuda"
+            and kind in NEMO_DIARIZERS
+            and not report["workers"].get(kind, {}).get("cuda")
+        ):
+            label = "Sortformer" if kind == "sortformer" else "Nemotron"
+            report["errors"].append(f"CUDA is unavailable in the {label} worker")
     for key in required_models(profile, args.asr, diarization_backend=args.diarization_backend):
         try:
             model = local_models(args.model_dir, [key], verify_hashes=args.verify_hashes)[key]

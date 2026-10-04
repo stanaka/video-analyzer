@@ -1,5 +1,6 @@
 import itertools
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -244,7 +245,7 @@ COMBINATIONS = list(itertools.product((False, True), repeat=3))
 @pytest.mark.parametrize("enabled", COMBINATIONS)
 @pytest.mark.parametrize("asr", ["whisper", "qwen"])
 @pytest.mark.parametrize("profile", ["cpu", "mac", "cuda"])
-@pytest.mark.parametrize("backend", ["pyannote", "sortformer"])
+@pytest.mark.parametrize("backend", ["pyannote", "sortformer", "nemotron"])
 def test_independent_features_and_resume(
     enabled, asr, profile, backend, simulated_media, fake_models, monkeypatch, tmp_path
 ):
@@ -275,7 +276,7 @@ def test_independent_features_and_resume(
     if vision:
         expected_models.add("molmo-mlx" if profile == "mac" else "molmo-torch")
     if diarization:
-        expected_models.add("diarization" if backend == "pyannote" else "sortformer")
+        expected_models.add(pipeline.DIARIZATION_MODELS[backend])
     if transcription:
         expected_models.add(asr)
         if asr == "qwen":
@@ -285,8 +286,8 @@ def test_independent_features_and_resume(
     expected_workers = set()
     if transcription or (diarization and backend == "pyannote") or (vision and profile != "mac"):
         expected_workers.add("torch")
-    if diarization and backend == "sortformer":
-        expected_workers.add("sortformer")
+    if diarization and backend != "pyannote":
+        expected_workers.add(backend)
     if vision and profile == "mac":
         expected_workers.add("mlx")
     assert set(checked_workers) == expected_workers
@@ -362,14 +363,15 @@ def test_feature_changes_separate_checkpoints(feature, simulated_media, fake_mod
 
 
 @pytest.mark.parametrize("change", ["backend", "revision"])
+@pytest.mark.parametrize("backend", ["sortformer", "nemotron"])
 def test_diarization_identity_separates_transcription_checkpoints(
-    change, simulated_media, fake_models, monkeypatch, tmp_path
+    change, backend, simulated_media, fake_models, monkeypatch, tmp_path
 ):
     path, media, _ = simulated_media
     fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
     config = AnalysisConfig(
         profile="cpu",
-        diarization_backend="sortformer",
+        diarization_backend=backend,
         scene_description=False,
         work_dir=tmp_path / "work",
     )
@@ -378,7 +380,7 @@ def test_diarization_identity_separates_transcription_checkpoints(
 
     def changed_models(root, keys):
         models = local(root, keys)
-        models["sortformer"]["revision"] = "different-checkpoint"
+        models[backend]["revision"] = "different-checkpoint"
         return models
 
     with monkeypatch.context() as patch:
@@ -392,6 +394,33 @@ def test_diarization_identity_separates_transcription_checkpoints(
     assert fake_models.operations.count("transcribe") == 6
     requests = fake_models.requests.copy()
     pipeline.analyze_video(path, config.model_copy(update={"resume": True}))
+    assert fake_models.requests == requests
+
+
+@pytest.mark.parametrize(
+    "updates", [{"runtime_revision": "changed-source"}, {"speaker_cache": 272}]
+)
+def test_nemotron_runtime_and_settings_invalidate_checkpoints(
+    updates, simulated_media, fake_models, monkeypatch, tmp_path
+):
+    path, media, _ = simulated_media
+    fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "speaker_7"}]
+    config = AnalysisConfig(
+        profile="cpu",
+        diarization_backend="nemotron",
+        scene_description=False,
+        work_dir=tmp_path / "work",
+    )
+    first = pipeline.analyze_video(path, config)
+    spec = pipeline.NEMO_DIARIZERS["nemotron"]
+    with monkeypatch.context() as patch:
+        patch.setitem(pipeline.NEMO_DIARIZERS, "nemotron", replace(spec, **updates))
+        pipeline.analyze_video(path, config.model_copy(update={"resume": True}))
+    assert fake_models.operations.count("diarize") == 2
+    assert fake_models.operations.count("transcribe") == 6
+    requests = fake_models.requests.copy()
+    resumed = pipeline.analyze_video(path, config.model_copy(update={"resume": True}))
+    assert resumed.transcript == first.transcript
     assert fake_models.requests == requests
 
 
@@ -430,6 +459,7 @@ def test_pyannote_settings_invalidate_checkpoints(updates, simulated_media, fake
     [
         ("pyannote", {}, {}, {}),
         ("sortformer", {}, {}, {}),
+        ("nemotron", {}, {}, {}),
         (
             "pyannote",
             {"min_speakers": 2, "max_speakers": 4},
@@ -460,7 +490,7 @@ def test_diarization_worker_settings(
     pipeline.analyze_video(path, config)
     [(load_operation, load), (operation, diarize)] = fake_models.requests
     assert load_operation == "load" and operation == "diarize"
-    kind = "diarization" if backend == "pyannote" else "sortformer"
+    kind = pipeline.DIARIZATION_MODELS[backend]
     assert load == {
         "kind": kind,
         "model": str(config.model_dir / kind),
@@ -521,7 +551,7 @@ def test_equivalent_yaml_and_cli_reuse_checkpoints(simulated_media, fake_models,
 
 
 @pytest.mark.parametrize("enabled", COMBINATIONS)
-@pytest.mark.parametrize("backend", ["pyannote", "sortformer"])
+@pytest.mark.parametrize("backend", ["pyannote", "sortformer", "nemotron"])
 def test_feature_selection_without_audio(
     enabled, backend, simulated_media, fake_models, tmp_path, monkeypatch
 ):
@@ -701,7 +731,7 @@ def test_invalid_audio_normalization():
 
 @pytest.mark.parametrize("normalization,noise_reduction", AUDIO_PROCESSING)
 @pytest.mark.parametrize("asr", ["whisper", "qwen"])
-@pytest.mark.parametrize("backend", ["pyannote", "sortformer"])
+@pytest.mark.parametrize("backend", ["pyannote", "sortformer", "nemotron"])
 def test_shared_processed_audio_and_resume(
     normalization,
     noise_reduction,

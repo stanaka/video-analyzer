@@ -33,11 +33,15 @@ def capabilities(check_backend=None):
         import mlx.core as mx
 
         result["metal"] = mx.metal.is_available()
-    if check_backend == "sortformer":
+    if check_backend in ("sortformer", "nemotron"):
         from .sortformer import import_sortformer
 
-        import_sortformer()
-        result["sortformer"] = True
+        import_sortformer(check_backend)
+        result[check_backend] = True
+        if check_backend == "nemotron":
+            from ..diarization import NEMOTRON_RUNTIME_REVISION
+
+            result["nemo_source_revision"] = NEMOTRON_RUNTIME_REVISION
     return result
 
 
@@ -84,7 +88,7 @@ def main():
                         from .vision import TorchVision
 
                         backend = TorchVision(payload)
-                    elif payload["kind"] == "sortformer":
+                    elif payload["kind"] in ("sortformer", "nemotron"):
                         from .sortformer import SortformerBackend
 
                         backend = SortformerBackend(payload)

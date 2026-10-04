@@ -19,8 +19,8 @@ def worker_python(runtime_dir: Path, kind: str) -> Path:
     path = runtime_dir.resolve() / kind / "bin" / "python"
     if not path.is_file():
         setup = (
-            "mise run setup:sortformer"
-            if kind == "sortformer"
+            f"mise run setup:{kind}"
+            if kind in ("sortformer", "nemotron")
             else "scripts/setup-mac.sh or scripts/setup-cuda.sh"
         )
         raise AnalysisError(f"Worker environment is missing: {path}. Run {setup}.")

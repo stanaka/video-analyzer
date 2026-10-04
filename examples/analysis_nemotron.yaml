@@ -1,0 +1,6 @@
+# Install with mise run setup:nemotron, then prepare with --diarization-backend nemotron.
+# Nemotron estimates up to eight speakers; omit speaker counts and pyannote tuning.
+diarization_backend: nemotron
+language: ja
+report_language: ja
+diarization_device: auto

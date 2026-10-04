@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .diarization import NEMO_DIARIZERS
+
 
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -32,7 +34,7 @@ class AnalysisConfig(Record):
     diarization: bool = True
     scene_description: bool = True
     asr: Literal["whisper", "qwen"] = "whisper"
-    diarization_backend: Literal["pyannote", "sortformer"] = "pyannote"
+    diarization_backend: Literal["pyannote", "sortformer", "nemotron"] = "pyannote"
     profile: Literal["auto", "mac", "cuda", "cpu"] = "auto"
     model_dir: Path = Path(".models")
     runtime_dir: Path = Path(".runtime")
@@ -69,7 +71,7 @@ class AnalysisConfig(Record):
             raise ValueError("min_speakers must be less than or equal to max_speakers")
         if (
             self.diarization
-            and self.diarization_backend == "sortformer"
+            and self.diarization_backend in NEMO_DIARIZERS
             and (
                 any(
                     value is not None
@@ -78,8 +80,14 @@ class AnalysisConfig(Record):
                 or self.pyannote.overrides()
             )
         ):
+            spec = NEMO_DIARIZERS[self.diarization_backend]
+            label, count = (
+                ("Sortformer", "four")
+                if self.diarization_backend == "sortformer"
+                else (spec.label, "eight")
+            )
             raise ValueError(
-                "Sortformer estimates its own speaker count (up to four speakers). "
+                f"{label} estimates its own speaker count (up to {count} speakers). "
                 "Omit --num-speakers / num_speakers, --min-speakers / min_speakers, "
                 "--max-speakers / max_speakers, and pyannote tuning settings, "
                 "or select the pyannote backend."

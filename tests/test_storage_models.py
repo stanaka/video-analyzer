@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from video_analyzer.diarization import NEMO_DIARIZERS
 from video_analyzer.errors import AnalysisError
 from video_analyzer.models import (
     MODEL_REPOS,
-    SORTFORMER_CHECKPOINT,
     local_models,
     prepare_models,
     required_models,
@@ -125,6 +125,7 @@ def test_required_models_preserves_defaults(profile, vision, asr, speech):
     [
         ("pyannote", ["diarization"]),
         ("sortformer", ["sortformer"]),
+        ("nemotron", ["nemotron"]),
         ("both", ["diarization", "sortformer"]),
     ],
 )
@@ -135,8 +136,15 @@ def test_selected_diarization_models(backend, keys):
     assert required_models("cpu", "whisper", diarization=False, **options) == []
 
 
-@pytest.mark.parametrize("files", [{"README.md": b"metadata only"}, {SORTFORMER_CHECKPOINT: b""}])
-def test_sortformer_requires_nonempty_checkpoint(tmp_path, files):
+@pytest.mark.parametrize("backend", ["sortformer", "nemotron"])
+@pytest.mark.parametrize("invalid", ["metadata_only", "empty", "wrong_repo"])
+def test_nemo_requires_correct_nonempty_checkpoint(tmp_path, backend, invalid):
+    checkpoint = NEMO_DIARIZERS[backend].checkpoint
+    files = (
+        {"README.md": b"metadata only"}
+        if invalid == "metadata_only"
+        else {checkpoint: b"" if invalid == "empty" else b"weights"}
+    )
     for name, content in files.items():
         (tmp_path / name).write_bytes(content)
     atomic_json(
@@ -144,8 +152,10 @@ def test_sortformer_requires_nonempty_checkpoint(tmp_path, files):
         {
             "schema_version": 1,
             "models": {
-                "sortformer": {
-                    "repo_id": MODEL_REPOS["sortformer"],
+                backend: {
+                    "repo_id": "incorrect/repo"
+                    if invalid == "wrong_repo"
+                    else MODEL_REPOS[backend],
                     "revision": "abc",
                     "path": ".",
                     "files": {
@@ -156,8 +166,8 @@ def test_sortformer_requires_nonempty_checkpoint(tmp_path, files):
             },
         },
     )
-    with pytest.raises(AnalysisError, match="NVIDIA v2.1 checkpoint"):
-        local_models(tmp_path, ["sortformer"])
+    with pytest.raises(AnalysisError, match="NVIDIA.*checkpoint"):
+        local_models(tmp_path, [backend])
 
 
 @pytest.fixture
@@ -172,7 +182,7 @@ def hub(monkeypatch, tmp_path):
     sources = {}
     requests = []
     for key, repo in MODEL_REPOS.items():
-        filename = SORTFORMER_CHECKPOINT if key == "sortformer" else "model.safetensors"
+        filename = NEMO_DIARIZERS[key].checkpoint if key in NEMO_DIARIZERS else "model.safetensors"
         sources[repo] = {filename: b"weights", "README.md": b"model card"}
 
     def info(repo, **kwargs):
@@ -199,34 +209,40 @@ def hub(monkeypatch, tmp_path):
     return sources, requests
 
 
-def test_preparation_coexists_preserves_models_and_hashes_checkpoint(tmp_path, hub):
+@pytest.mark.parametrize("backend", ["sortformer", "nemotron"])
+def test_preparation_coexists_preserves_models_and_hashes_checkpoint(tmp_path, hub, backend):
     root = tmp_path / "models"
+    filename = NEMO_DIARIZERS[backend].checkpoint
     first = prepare_models(root, "cuda", "both", diarization_backend="pyannote")
-    assert "sortformer" not in first["models"]
-    second = prepare_models(root, "cuda", "whisper", diarization_backend="sortformer")
+    assert backend not in first["models"]
+    second = prepare_models(root, "cuda", "whisper", diarization_backend=backend)
     assert all(second["models"][key] == value for key, value in first["models"].items())
-    checkpoint = second["models"]["sortformer"]
+    checkpoint = second["models"][backend]
     assert checkpoint["revision"] == "resolved-immutable-sha"
-    assert checkpoint["files"][SORTFORMER_CHECKPOINT] == {
+    assert checkpoint["files"][filename] == {
         "size": 7,
-        "sha256": file_hash(root / "sortformer" / SORTFORMER_CHECKPOINT),
+        "sha256": file_hash(root / backend / filename),
     }
+    assert set(checkpoint["files"]) == {filename, "README.md"}
     both = prepare_models(root, "cuda", "both", diarization_backend="both")
-    assert both == second
+    assert all(both["models"][key] == value for key, value in second["models"].items())
+    assert ("nemotron" in both["models"]) == (backend == "nemotron")
     assert set(local_models(root, list(both["models"]), verify_hashes=True)) == set(both["models"])
-    (root / "sortformer" / SORTFORMER_CHECKPOINT).unlink()
-    with pytest.raises(AnalysisError, match="Missing or incomplete.*sortformer"):
-        local_models(root, ["sortformer"])
+    (root / backend / filename).unlink()
+    with pytest.raises(AnalysisError, match=f"Missing or incomplete.*{backend}"):
+        local_models(root, [backend])
 
 
-def test_upstream_sortformer_metadata_without_checkpoint_fails(tmp_path, hub):
+@pytest.mark.parametrize("backend", ["sortformer", "nemotron"])
+def test_upstream_nemo_metadata_without_checkpoint_fails(tmp_path, hub, backend):
     sources, _ = hub
-    del sources[MODEL_REPOS["sortformer"]][SORTFORMER_CHECKPOINT]
-    with pytest.raises(AnalysisError, match="Missing diar_streaming_sortformer"):
-        prepare_models(tmp_path / "models", "cuda", "whisper", diarization_backend="sortformer")
+    del sources[MODEL_REPOS[backend]][NEMO_DIARIZERS[backend].checkpoint]
+    with pytest.raises(AnalysisError, match=f"Missing {NEMO_DIARIZERS[backend].checkpoint}"):
+        prepare_models(tmp_path / "models", "cuda", "whisper", diarization_backend=backend)
 
 
-def test_download_failure_names_selected_backend(tmp_path, hub, monkeypatch):
+@pytest.mark.parametrize("backend", ["sortformer", "nemotron"])
+def test_download_failure_names_selected_backend(tmp_path, hub, monkeypatch, backend):
     import subprocess
 
     import video_analyzer.models as models
@@ -234,12 +250,10 @@ def test_download_failure_names_selected_backend(tmp_path, hub, monkeypatch):
     download = models.subprocess.run
 
     def fail_sortformer(command, **kwargs):
-        if MODEL_REPOS["sortformer"] in command:
+        if MODEL_REPOS[backend] in command:
             raise subprocess.CalledProcessError(1, command)
         return download(command, **kwargs)
 
     monkeypatch.setattr(models.subprocess, "run", fail_sortformer)
-    with pytest.raises(
-        AnalysisError, match="Cannot prepare nvidia/diar_streaming_sortformer_4spk-v2.1"
-    ):
-        prepare_models(tmp_path / "models", "cuda", "whisper", diarization_backend="sortformer")
+    with pytest.raises(AnalysisError, match=f"Cannot prepare {MODEL_REPOS[backend]}"):
+        prepare_models(tmp_path / "models", "cuda", "whisper", diarization_backend=backend)

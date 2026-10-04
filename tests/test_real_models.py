@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from video_analyzer import AnalysisConfig, analyze_video
+from video_analyzer.diarization import NEMO_DIARIZERS, NEMOTRON_RUNTIME_REVISION
 from video_analyzer.models import local_models, resolve_profile
 from video_analyzer.report import render_markdown
 from video_analyzer.timeline import join_text
@@ -20,12 +21,12 @@ from video_analyzer.worker_client import Worker
 
 pytestmark = pytest.mark.models
 
-DIARIZERS = ("pyannote", "sortformer")
+DIARIZERS = ("pyannote", "sortformer", "nemotron")
 
 
 def selected_diarizers():
     selected = os.environ.get("VIDEO_ANALYZER_TEST_DIARIZATION", "pyannote")
-    return DIARIZERS if selected == "both" else (selected,)
+    return ("pyannote", "sortformer") if selected == "both" else (selected,)
 
 
 @pytest.mark.parametrize("asr", ["whisper", "qwen"])
@@ -35,7 +36,9 @@ def test_real_offline_pipeline(asr, diarizer, monkeypatch, tmp_path):
     if not fixture:
         pytest.skip("Set VIDEO_ANALYZER_MODEL_TEST_VIDEO to enable real-model tests")
     if diarizer not in selected_diarizers():
-        pytest.skip("Set VIDEO_ANALYZER_TEST_DIARIZATION=sortformer or both")
+        pytest.skip(
+            "Set VIDEO_ANALYZER_TEST_DIARIZATION to the backend under test (or both for pyannote/Sortformer)"
+        )
     monkeypatch.setenv("HF_HOME", str(tmp_path / "empty-hf"))
     monkeypatch.delenv("HF_TOKEN", raising=False)
     root = Path(__file__).resolve().parents[1]
@@ -78,17 +81,19 @@ def test_real_offline_pipeline(asr, diarizer, monkeypatch, tmp_path):
     assert resumed.provenance["stage_metrics"] == result.provenance["stage_metrics"]
 
 
-def test_real_sortformer_short_silent_and_streaming_audio(monkeypatch, tmp_path, capfd):
+@pytest.mark.parametrize("diarizer", ["sortformer", "nemotron"])
+def test_real_nemo_short_silent_and_streaming_audio(monkeypatch, tmp_path, capfd, diarizer):
     """Small edge cases plus a >2-chunk recording, using only prepared assets."""
     fixture = os.environ.get("VIDEO_ANALYZER_MODEL_TEST_VIDEO")
-    if not fixture or "sortformer" not in selected_diarizers():
-        pytest.skip("Select Sortformer and VIDEO_ANALYZER_MODEL_TEST_VIDEO for real-model tests")
+    if not fixture or diarizer not in selected_diarizers():
+        pytest.skip("Select the diarizer and VIDEO_ANALYZER_MODEL_TEST_VIDEO for real-model tests")
     from video_analyzer.media import extract_audio, probe
 
     monkeypatch.setenv("HF_HOME", str(tmp_path / "empty-hf"))
     monkeypatch.delenv("HF_TOKEN", raising=False)
     root = Path(__file__).resolve().parents[1]
-    model = local_models(root / ".models", ["sortformer"])["sortformer"]
+    model = local_models(root / ".models", [diarizer])[diarizer]
+    spec = NEMO_DIARIZERS[diarizer]
     audio = tmp_path / "fixture.wav"
     extract_audio(probe(Path(fixture)), audio)
     with wave.open(str(audio), "rb") as source:
@@ -102,9 +107,13 @@ def test_real_sortformer_short_silent_and_streaming_audio(monkeypatch, tmp_path,
         if resolve_profile(os.environ.get("VIDEO_ANALYZER_TEST_PROFILE", "auto")) == "cuda"
         else "cpu"
     )
-    with Worker(root / ".runtime", "sortformer") as worker:
-        runtime = worker.request("load", kind="sortformer", model=model["directory"], device=device)
-        assert runtime["diarization_backend"] == "sortformer"
+    with Worker(root / ".runtime", diarizer) as worker:
+        runtime = worker.request("load", kind=diarizer, model=model["directory"], device=device)
+        assert runtime["diarization_backend"] == diarizer
+        assert runtime["inference_settings"]["frame_seconds"] == spec.frame_seconds
+        assert runtime["exclusive_timeline_method"] == spec.exclusive_method
+        if diarizer == "nemotron":
+            assert runtime["nemo_source_revision"] == NEMOTRON_RUNTIME_REVISION
         for name, pcm in (
             ("empty", b""),
             ("short", b"\0\0" * 160),
@@ -126,7 +135,8 @@ def test_real_sortformer_short_silent_and_streaming_audio(monkeypatch, tmp_path,
                 assert result["regular"] == result["exclusive"] == []
             else:
                 assert result["regular"]
-    assert "Sortformer streaming step 3" in capfd.readouterr().err
+    label = "Sortformer" if diarizer == "sortformer" else "Nemotron 3"
+    assert f"{label} streaming step 3" in capfd.readouterr().err
 
 
 def test_molmo_maximum_frame_budget(monkeypatch, tmp_path):

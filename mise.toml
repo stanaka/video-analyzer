@@ -34,6 +34,10 @@ run = "uv sync --frozen"
 description = "Install the optional Sortformer v2.1 worker with Python 3.12"
 run = "bash scripts/setup-sortformer.sh"
 
+[tasks."setup:nemotron"]
+description = "Install the optional Nemotron 3 worker with Python 3.12 and pinned NeMo source"
+run = "bash scripts/setup-nemotron.sh"
+
 # Runtime tasks deliberately have no setup dependency: they never install packages
 # or download models implicitly. Arguments are forwarded to the underlying CLI.
 [tasks.prepare-models]

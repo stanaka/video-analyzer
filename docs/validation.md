@@ -210,7 +210,7 @@ To reproduce these five checks after preparing both diarizers and ASR backends:
 /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
   /usr/bin/env VIDEO_ANALYZER_MODEL_TEST_VIDEO=/absolute/path/fixture.mp4 \
   VIDEO_ANALYZER_TEST_DIARIZATION=both \
-  .venv/bin/pytest -m models -k 'real_offline_pipeline or real_sortformer' -v -s
+  .venv/bin/pytest -m models -k 'real_offline_pipeline or real_nemo' -v -s
 ```
 
 On an NVIDIA host, also set `VIDEO_ANALYZER_TEST_PROFILE=cuda` and use the Linux
@@ -261,3 +261,67 @@ allocation. The observed speed and memory differences do not promise improved
 Japanese accuracy or throughput on other hardware. Raw outputs, fixture spans,
 and the local comparison script are retained in the ignored
 `.validation/sortformer-japanese` directory of this working copy.
+
+## Nemotron 3 setup and validation (2026-10-04)
+
+The optional Nemotron runtime was installed on the same Apple M2 Mac with
+`mise run setup:nemotron`: Python 3.12.15, PyTorch/torchaudio 2.8.0, and NVIDIA
+NeMo source revision `1688cc3d6a9ade854f544987810c53f605dc86fc`, reporting version
+3.1.0. The published NeMo 3.0.0 implementation lacks the required high-resolution
+output support. Separate dependency resolutions and SHA-256 locks were generated
+for macOS arm64 and Linux x86_64. Both locks record source archive SHA-256
+`bd7bb5ebc4dba9f377fa39b064e4e8fd01d6ea6e94b430300595ccda25f506f2`.
+Linux installation and CPU/CUDA inference were not executed; no Linux/NVIDIA host
+was available. Existing CLI, PyTorch, MLX, and Sortformer environments were retained.
+
+Explicit `prepare-models --profile mac --diarization-backend nemotron` preparation
+preserved all six previously prepared model manifest entries. The NVIDIA
+`Nemotron-3-Diarization.nemo` checkpoint is 198,676,480 bytes, from immutable model
+revision `f667ed73aee57d40cc39428eb768b4fd87a0a29e`, with SHA-256
+`867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d`.
+Only this checkpoint and README were recorded under `nemotron`. Its restored
+configuration has eight speaker channels, high-resolution output enabled, and
+output subsampling factor one at a 10 ms feature stride.
+
+Offline `doctor --profile mac --diarization-backend nemotron --verify-hashes`
+passed under OS network denial, checking the pinned source and required APIs as
+well as the existing ASR and vision workers. Inference uses CPU for Nemotron,
+retains 80 ms encoder units for the recording preset, and derives timestamps and
+progress from the actual 10 ms output stride. NeMo reports an effective cache
+update period of 340 for the configured period 300; both are recorded in runtime
+provenance, along with the source revision and exclusive-timeline derivation.
+
+All **668 normal tests** passed. Coverage includes the three diarizers with both
+ASRs and Mac/CPU/CUDA profile routing, eight-channel probabilities, all eight
+speaker labels, 10 ms overlap projection, silence and partial-frame boundaries,
+invalid checkpoints and runtime sources, progress cleanup, and cache invalidation
+when the backend, model revision, NeMo source revision, or adapter settings change.
+These routing tests use model doubles; CUDA hardware coverage remains unverified.
+Lint, formatting, setup-script syntax checks, and the offline wheel/source build
+also passed.
+
+Three real Nemotron acceptance tests passed under OS network denial: pipeline
+integration with Whisper and Qwen, and an empty/short/silent/multiple-chunk audio
+test. Both pipelines used the existing 16.3-second Japanese/English fixture,
+detected two speakers, produced Japanese scene descriptions, and then completed
+resume with a worker factory that raises if invoked. Each test used a separate
+empty `HF_HOME` without a token. The edge-case test reused one loaded worker for
+empty audio, 10 ms of silence, one second of silence, and 65 seconds of repeated
+fixture audio. Silent inputs produced empty timelines; the long input emitted
+three streaming steps and bounded, nonoverlapping exclusive turns.
+
+To reproduce the three checks after preparing the Nemotron checkpoint and both
+ASR backends:
+
+```bash
+/usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+  /usr/bin/env VIDEO_ANALYZER_MODEL_TEST_VIDEO=/absolute/path/fixture.mp4 \
+  VIDEO_ANALYZER_TEST_DIARIZATION=nemotron \
+  .venv/bin/pytest -m models -k 'real_offline_pipeline or real_nemo' -v -s
+```
+
+Raw JSON/Markdown reports, checkpoints, and edge-case WAV files remain in the
+ignored `.validation/nemotron-acceptance` directory of this working copy. The
+eight-speaker output limit and timeline math are covered by unit tests; this
+two-speaker fixture establishes integration rather than a diarization accuracy
+benchmark.
