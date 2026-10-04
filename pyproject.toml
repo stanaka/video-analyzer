@@ -22,14 +22,22 @@ dependencies = [
 video-analyzer = "video_analyzer.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.4,<10", "ruff>=0.14,<1"]
+dev = [
+    "playwright>=1.55,<2",
+    "pytest>=8.4,<10",
+    "ruff>=0.14,<1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/video_analyzer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: uses FFmpeg and real video decoding", "models: opt-in local model inference"]
+markers = [
+  "integration: uses FFmpeg and real video decoding",
+  "models: opt-in local model inference",
+  "browser: opt-in Playwright tests requiring installed browser binaries",
+]
 
 [tool.ruff]
 target-version = "py311"

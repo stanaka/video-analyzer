@@ -13,5 +13,7 @@ build/
 dist/
 *.analysis.md
 *.analysis.json
+*.analysis.html
+*.analysis.media/
 .video-analyzer/
 .validation/

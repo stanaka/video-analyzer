@@ -23,15 +23,20 @@ def run_media(args: list[str], *, timeout=600, return_stderr=False) -> str:
         raise AnalysisError(f"{args[0]} exceeded its {timeout}s timeout") from exc
 
 
-def probe(path: Path, audio_stream: int = 0) -> MediaInfo:
+def probe_streams(path: Path) -> dict:
+    """Inspect the container without loading any model or video decoding library."""
     if not path.is_file() or path.suffix.lower() != ".mp4":
         raise AnalysisError(f"Input must be an existing local MP4 file: {path}")
-    data = json.loads(
+    return json.loads(
         run_media(
             ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
             timeout=120,
         )
     )
+
+
+def probe(path: Path, audio_stream: int = 0) -> MediaInfo:
+    data = probe_streams(path)
     streams = data.get("streams", [])
     videos = [
         s
@@ -177,6 +182,41 @@ def extract_audio(
                 str(temporary),
             ],
             timeout=timeout,
+        )
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def extract_original_audio(media: MediaInfo, target: Path) -> None:
+    """Decode the selected track as PCM16, retaining its sample rate and channels.
+
+    Only align/pad/trim to the video; do not normalize, denoise, or downmix.
+    This provides portable track selection for browsers that ignore audioTracks.
+    """
+    temporary = target.with_suffix(".partial.wav")
+    try:
+        run_media(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-y",
+                "-v",
+                "error",
+                "-copyts",
+                "-i",
+                media.path,
+                "-map",
+                f"0:{media.audio_stream_index}",
+                "-vn",
+                "-af",
+                f"asetpts=PTS-({media.video_start:.9f})/TB,"
+                f"aresample=async=1:first_pts=0,apad,atrim=end={media.duration:.9f}",
+                "-c:a",
+                "pcm_s16le",
+                str(temporary),
+            ],
+            timeout=max(600, media.duration * 2),
         )
         temporary.replace(target)
     finally:

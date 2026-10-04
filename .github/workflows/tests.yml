@@ -22,3 +22,9 @@ jobs:
         run: brew install ffmpeg
       - run: mise run setup:dev
       - run: mise run check
+      - name: Install browser test dependencies
+        if: runner.os == 'Linux'
+        run: PLAYWRIGHT_BROWSERS_PATH=.cache/playwright .venv/bin/python -m playwright install --with-deps chromium
+      - name: Test HTML viewer
+        if: runner.os == 'Linux'
+        run: mise run test:browser

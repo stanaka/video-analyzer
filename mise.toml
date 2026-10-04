@@ -57,7 +57,20 @@ run = ".venv/bin/video-analyzer analyze"
 
 [tasks.test]
 description = "Run tests without loading real models"
-run = ".venv/bin/python -m pytest -m 'not models'"
+run = ".venv/bin/python -m pytest -m 'not models and not browser'"
+
+[tasks.export-html]
+description = "Export an offline HTML viewer from a saved JSON analysis"
+raw_args = true
+run = ".venv/bin/video-analyzer export-html"
+
+[tasks."setup:browser-tests"]
+description = "Explicitly download Chromium for HTML viewer tests"
+run = "PLAYWRIGHT_BROWSERS_PATH=.cache/playwright .venv/bin/python -m playwright install chromium"
+
+[tasks."test:browser"]
+description = "Test local HTML playback in Chromium (requires setup:browser-tests)"
+run = "PLAYWRIGHT_BROWSERS_PATH=.cache/playwright .venv/bin/python -m pytest -m browser"
 
 [tasks."test:models"]
 description = "Run opt-in real-model tests with VIDEO_ANALYZER_MODEL_TEST_VIDEO"

@@ -13,4 +13,18 @@ def analyze_video(path, config=None):
     return run(path, config or AnalysisConfig())
 
 
-__all__ = ["AnalysisConfig", "AnalysisResult", "analyze_video", "render_json", "render_markdown"]
+def write_html(result, output, *, video_path=None):
+    """Export an offline HTML viewer and audio sidecars without rerunning analysis."""
+    from .html_report import write_html as write
+
+    return write(result, output, video_path=video_path)
+
+
+__all__ = [
+    "AnalysisConfig",
+    "AnalysisResult",
+    "analyze_video",
+    "render_json",
+    "render_markdown",
+    "write_html",
+]

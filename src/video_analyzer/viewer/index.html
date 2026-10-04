@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="@@LANG@@">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>@@TITLE@@ · Video Analyzer</title>
+  <style>@@CSS@@</style>
+</head>
+<body>
+  <main>
+    <header class="report-header">
+      <div><p class="eyebrow">VIDEO ANALYZER <span> / </span> LOCAL REPORT</p><h1 id="title"></h1></div>
+      <span id="summary" class="summary"></span>
+    </header>
+    <section id="player" class="player" aria-label="Video player">
+      <div class="video-stage"><video id="video" preload="metadata" playsinline></video></div>
+      <div class="transport">
+        <button id="play" type="button" data-i18n="play"></button>
+        <output id="clock" class="clock">00:00.000 / 00:00.000</output>
+        <input id="seek" type="range" min="0" value="0" step="0.01" data-label="seek">
+        <button id="mute" type="button" data-i18n="mute"></button>
+        <input id="volume" type="range" min="0" max="1" step="0.05" value="1" data-label="volume">
+        <select id="speed" data-label="speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+        <button id="fullscreen" type="button" data-i18n="fullscreen"></button>
+      </div>
+      <div class="audio-toolbar">
+        <label><span data-i18n="audio"></span> <select id="audio-mode"></select></label>
+        <label class="file-label"><span data-i18n="locate"></span><input id="video-file" type="file" accept="video/mp4,.mp4" data-label="locate"></label>
+      </div>
+      <p id="media-error" role="alert" hidden></p>
+    </section>
+    <section class="timeline-panel" aria-labelledby="timeline-title">
+      <div class="section-heading"><div><h2 id="timeline-title" data-i18n="timeline"></h2><p class="hint" data-i18n="timelineHint"></p></div>
+        <div class="zoom-controls"><button id="fit" type="button" data-i18n="fit"></button><label><span data-i18n="zoom"></span> <input id="zoom" type="range" min="1" max="32" value="1" step="0.5"></label></div>
+      </div>
+      <div id="timeline-scroll" tabindex="0" data-label="timeline">
+        <div id="timeline"><div id="ruler" class="ruler"></div><div id="tracks"></div><div id="playhead" aria-hidden="true"></div></div>
+      </div>
+      <p id="timeline-empty" class="empty" hidden></p>
+    </section>
+    <div class="details-grid">
+      <section class="transcript-panel"><h2 data-i18n="transcript"></h2><div id="transcript"></div></section>
+      <section class="scenes-panel"><h2 data-i18n="scenes"></h2><div id="scenes"></div></section>
+    </div>
+    <details class="metadata"><summary data-i18n="metadata"></summary><ul id="warnings"></ul><pre id="metadata"></pre></details>
+    <footer data-i18n="footer"></footer>
+  </main>
+  <div id="tooltip" role="tooltip" hidden><strong id="tooltip-title"></strong><p id="tooltip-text"></p></div>
+  <noscript>This report requires JavaScript to display the timeline and synchronize playback.</noscript>
+  <script id="analysis-data" type="application/json">@@DATA@@</script>
+  <script>@@JS@@</script>
+</body>
+</html>

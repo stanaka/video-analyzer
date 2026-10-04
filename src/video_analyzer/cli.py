@@ -6,15 +6,15 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from . import __version__, analyze_video
+from . import __version__, analyze_video, write_html
 from .config import load_settings, merge_settings
 from .diarization import NEMO_DIARIZERS, selected_diarizers
 from .errors import AnalysisError
 from .media import prerequisites
 from .models import local_models, prepare_models, required_models, resolve_profile
 from .report import render_json, render_markdown
-from .schema import AnalysisConfig
-from .storage import atomic_text
+from .schema import AnalysisConfig, AnalysisResult
+from .storage import atomic_text, read_json
 from .worker_client import Worker
 
 PYANNOTE_PARAMETERS = {
@@ -116,6 +116,7 @@ def parser(*, sparse=False):
         "  video-analyzer analyze input.mp4\n"
         "  video-analyzer analyze input.mp4 --config settings.yaml --max-speakers 4\n"
         "  video-analyzer analyze input.mp4 --asr qwen --format json -o report.json\n"
+        "  video-analyzer analyze input.mp4 --format html --audio-normalization dynamic --noise-reduction\n"
         "  video-analyzer analyze input.mp4 --resume --language ja --num-speakers 2\n"
         "  video-analyzer analyze input.mp4 --audio-normalization dynamic --noise-reduction\n"
         "  video-analyzer analyze input.mp4 --no-diarization --no-scene-description\n"
@@ -152,7 +153,7 @@ def parser(*, sparse=False):
     )
     analyze.add_argument(
         "--format",
-        choices=("markdown", "json"),
+        choices=("markdown", "json", "html"),
         default="markdown",
         help="Report output format (default: %(default)s)",
     )
@@ -160,7 +161,7 @@ def parser(*, sparse=False):
         "-o",
         "--output",
         type=Path,
-        help="Report path; defaults to INPUT.analysis.md or INPUT.analysis.json beside the video",
+        help="Report path; defaults to INPUT.analysis.md, .json, or .html beside the video",
     )
     analyze.add_argument(
         "--asr",
@@ -296,6 +297,26 @@ def parser(*, sparse=False):
             default="pyannote",
             help="Speaker diarization backend; sortformer is NVIDIA v2.1 (up to four speakers), nemotron is NVIDIA Nemotron 3 (up to eight). Both NVIDIA backends estimate counts automatically; omit speaker counts and pyannote tuning. On prepare-models/doctor, both selects pyannote and Sortformer v2.1 (default: %(default)s)",
         )
+    export = commands.add_parser(
+        "export-html",
+        help="Export an offline HTML viewer from a saved JSON analysis, without models",
+        description="Create an interactive HTML report referencing the original video.\n"
+        "FFmpeg generates configured audio in a companion .media folder; no models are run.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+        "  video-analyzer export-html input.analysis.json\n"
+        "  video-analyzer export-html report.json --video relocated.mp4 -o viewer.html",
+    )
+    export.add_argument("input", type=Path, help="Saved JSON analysis result")
+    export.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="HTML path; defaults to the JSON path with .html extension",
+    )
+    export.add_argument(
+        "--video", type=Path, help="Original MP4 at a new location; its recorded hash must match"
+    )
     if sparse:
         # Only supplied analysis flags should override YAML. Keep the public
         # parser's defaults and help unchanged for ordinary callers.
@@ -370,6 +391,13 @@ def main(argv=None) -> int:
             return 0
         if args.command == "doctor":
             return diagnose(args)
+        if args.command == "export-html":
+            output = args.output or args.input.with_suffix(".html")
+            if output.resolve() == args.input.resolve():
+                raise AnalysisError("Output must not overwrite the input JSON")
+            result = AnalysisResult.model_validate(read_json(args.input))
+            print(write_html(result, output, video_path=args.video))
+            return 0
         explicit = parser(sparse=True).parse_args(argv)
         options = {
             key: value
@@ -388,7 +416,9 @@ def main(argv=None) -> int:
             if args.config is not None:
                 raise AnalysisError(f"Invalid configuration {args.config}: {exc}") from exc
             raise
-        suffix = ".analysis.json" if args.format == "json" else ".analysis.md"
+        suffix = {"json": ".analysis.json", "markdown": ".analysis.md", "html": ".analysis.html"}[
+            args.format
+        ]
         output = args.output or args.input.with_suffix(suffix)
         if output.resolve() == args.input.resolve():
             raise AnalysisError("Output must not overwrite the input video")
@@ -407,9 +437,12 @@ def main(argv=None) -> int:
                 flush=True,
             )
         result = analyze_video(args.input, config)
-        atomic_text(
-            output, render_json(result) if args.format == "json" else render_markdown(result)
-        )
+        if args.format == "html":
+            write_html(result, output)
+        else:
+            atomic_text(
+                output, render_json(result) if args.format == "json" else render_markdown(result)
+            )
         print(str(output.resolve()))
         return 0
     except (AnalysisError, ValidationError, OSError) as exc:
