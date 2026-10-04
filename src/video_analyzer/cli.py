@@ -3,9 +3,11 @@ import json
 import sys
 from pathlib import Path
 
+import yaml
 from pydantic import ValidationError
 
 from . import __version__, analyze_video
+from .config import load_settings, merge_settings
 from .errors import AnalysisError
 from .media import prerequisites
 from .models import local_models, prepare_models, required_models, resolve_profile
@@ -14,8 +16,15 @@ from .schema import AnalysisConfig
 from .storage import atomic_text
 from .worker_client import Worker
 
+PYANNOTE_PARAMETERS = {
+    "pyannote_clustering_threshold": ("clustering", "threshold"),
+    "pyannote_clustering_fa": ("clustering", "Fa"),
+    "pyannote_clustering_fb": ("clustering", "Fb"),
+    "pyannote_segmentation_min_duration_off": ("segmentation", "min_duration_off"),
+}
 
-def parser():
+
+def parser(*, sparse=False):
     cli = argparse.ArgumentParser(
         prog="video-analyzer",
         description="Analyze local MP4 videos entirely offline after model preparation.",
@@ -104,6 +113,7 @@ def parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
         "  video-analyzer analyze input.mp4\n"
+        "  video-analyzer analyze input.mp4 --config settings.yaml --max-speakers 4\n"
         "  video-analyzer analyze input.mp4 --asr qwen --format json -o report.json\n"
         "  video-analyzer analyze input.mp4 --resume --language ja --num-speakers 2\n"
         "  video-analyzer analyze input.mp4 --audio-normalization dynamic --noise-reduction\n"
@@ -111,6 +121,16 @@ def parser():
         "  video-analyzer analyze input.mp4 --no-transcription --no-diarization",
     )
     analyze.add_argument("input", type=Path, help="Path to the local MP4 video")
+    analyze.add_argument(
+        "--config",
+        type=Path,
+        help="YAML analysis settings; explicit CLI options override individual settings; paths are relative to the current directory",
+    )
+    analyze.add_argument(
+        "--show-settings",
+        action="store_true",
+        help="Print merged analysis settings as YAML to stderr before starting analysis (default: disabled)",
+    )
     analyze.add_argument(
         "--transcription",
         action=argparse.BooleanOptionalAction,
@@ -172,7 +192,8 @@ def parser():
     )
     analyze.add_argument(
         "--resume",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help="Reuse completed checkpoints matching the input, settings, and models",
     )
     analyze.add_argument("--language", help="Spoken language; omitted means automatic detection")
@@ -185,8 +206,20 @@ def parser():
     analyze.add_argument(
         "--num-speakers",
         type=int,
-        help="Known speaker count for pyannote, at least 1; omit when using Sortformer",
+        help="Known speaker count for pyannote, at least 1; overrides min/max-speakers; omit when using Sortformer",
     )
+    for bound in ("min", "max"):
+        analyze.add_argument(
+            f"--{bound}-speakers",
+            type=int,
+            help=f"{'Minimum' if bound == 'min' else 'Maximum'} pyannote speaker count, at least 1; ignored with --num-speakers",
+        )
+    for name, (group, parameter) in PYANNOTE_PARAMETERS.items():
+        analyze.add_argument(
+            f"--{name.replace('_', '-')}",
+            type=float,
+            help=f"Override pyannote {group}.{parameter}; omitted uses the loaded model's default",
+        )
     analyze.add_argument(
         "--audio-stream",
         type=int,
@@ -262,6 +295,14 @@ def parser():
             default="pyannote",
             help="Speaker diarization backend; sortformer is NVIDIA v2.1, automatically estimates up to four speakers, and does not accept --num-speakers (default: %(default)s)",
         )
+    if sparse:
+        # Only supplied analysis flags should override YAML. Keep the public
+        # parser's defaults and help unchanged for ordinary callers.
+        for action in analyze._actions:
+            if action.dest in AnalysisConfig.model_fields or action.dest in PYANNOTE_PARAMETERS:
+                if action.help:
+                    action.help = action.help.replace("%(default)s", str(action.default))
+                action.default = argparse.SUPPRESS
     return cli
 
 
@@ -308,6 +349,7 @@ def diagnose(args) -> int:
 
 
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
     args = parser().parse_args(argv)
     try:
         if args.command == "prepare-models":
@@ -322,16 +364,42 @@ def main(argv=None) -> int:
             return 0
         if args.command == "doctor":
             return diagnose(args)
+        explicit = parser(sparse=True).parse_args(argv)
         options = {
             key: value
-            for key, value in vars(args).items()
-            if key not in {"input", "command", "format", "output"}
+            for key, value in vars(explicit).items()
+            if key in AnalysisConfig.model_fields
         }
-        config = AnalysisConfig(**options)
+        for name, (group, parameter) in PYANNOTE_PARAMETERS.items():
+            if hasattr(explicit, name):
+                options.setdefault("pyannote", {}).setdefault(group, {})[parameter] = getattr(
+                    explicit, name
+                )
+        settings = load_settings(args.config) if args.config is not None else {}
+        try:
+            config = AnalysisConfig.model_validate(merge_settings(settings, options))
+        except ValidationError as exc:
+            if args.config is not None:
+                raise AnalysisError(f"Invalid configuration {args.config}: {exc}") from exc
+            raise
         suffix = ".analysis.json" if args.format == "json" else ".analysis.md"
         output = args.output or args.input.with_suffix(suffix)
         if output.resolve() == args.input.resolve():
             raise AnalysisError("Output must not overwrite the input video")
+        if args.show_settings:
+            print(
+                "# Analysis settings\n"
+                "# Null pyannote tuning values use the loaded model's defaults.\n"
+                + yaml.safe_dump(
+                    config.model_dump(mode="json"),
+                    allow_unicode=True,
+                    sort_keys=False,
+                    default_flow_style=False,
+                ),
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
         result = analyze_video(args.input, config)
         atomic_text(
             output, render_json(result) if args.format == "json" else render_markdown(result)

@@ -148,6 +148,8 @@ its worker environment, regardless of the selected backend.
 
 ```bash
 mise run analyze input.mp4
+mise run analyze input.mp4 --config examples/analysis.yaml
+mise run analyze input.mp4 --config examples/analysis.yaml --show-settings
 mise run analyze input.mp4 --asr qwen --format json -o report.json
 mise run analyze input.mp4 --resume
 mise run analyze input.mp4 --language ja --num-speakers 2
@@ -177,6 +179,9 @@ after all stages succeed. Existing reports are preserved on failure.
 
 | Option | Default | Behavior |
 | --- | --- | --- |
+| `--config` | none | Load YAML analysis settings; explicit CLI options override individual settings |
+| `--show-settings` | disabled | Print all merged analysis settings as YAML to stderr before starting analysis |
+| `--resume` / `--no-resume` | disabled | Reuse matching checkpoints, or disable reuse even when enabled in YAML |
 | `--transcription` / `--no-transcription` | enabled | Enable or disable speech transcription |
 | `--diarization` / `--no-diarization` | enabled | Enable or disable speaker identification |
 | `--scene-description` / `--no-scene-description` | enabled | Enable or disable visual descriptions; scene detection always runs |
@@ -185,7 +190,12 @@ after all stages succeed. Existing reports are preserved on failure.
 | `--profile` | `auto` | MLX on Apple Silicon; CUDA elsewhere. Explicit `cpu` is available for large-memory hosts. |
 | `--language` | automatic | Spoken language hint, such as `ja` or `en`; no translation |
 | `--report-language` | `ja` | Japanese or English headings/descriptions |
-| `--num-speakers` | automatic | Optional known speaker count for pyannote; rejected with enabled Sortformer diarization |
+| `--num-speakers` | automatic | Optional known speaker count for pyannote; overrides min/max bounds; rejected with enabled Sortformer diarization |
+| `--min-speakers` / `--max-speakers` | automatic | Optional positive lower/upper speaker-count bounds for pyannote |
+| `--pyannote-clustering-threshold` | model default | Nonnegative threshold for initial clustering before VBx refinement |
+| `--pyannote-clustering-fa` | model default | Positive VBx acoustic-evidence scale (`Fa`) |
+| `--pyannote-clustering-fb` | model default | Positive VBx speaker-regularization coefficient (`Fb`) |
+| `--pyannote-segmentation-min-duration-off` | model default | Nonnegative pause duration in seconds; fills shorter gaps for the same speaker |
 | `--audio-stream` | `0` | Zero-based audio stream ordinal, not container stream index |
 | `--audio-normalization` | `off` | `off`, `peak` for one gain adjustment across the recording, or `dynamic` to balance quiet and loud passages |
 | `--noise-reduction` / `--no-noise-reduction` | disabled | Reduce rumble and background noise before normalization and audio analysis |
@@ -213,6 +223,71 @@ scene boundaries without requiring any prepared models or model workers.
 backends plus the profile's vision model.
 Markdown reports list the enabled features and omit disabled content sections;
 JSON retains its existing fields, with empty lists for disabled outputs.
+
+### YAML configuration and pyannote tuning
+
+Use `--config FILE` on `analyze` to load any `AnalysisConfig` settings by their
+snake_case field names. The input video, `--output`, and `--format` remain CLI
+arguments. `prepare-models` and `doctor` do not load analysis configuration files.
+Start with [examples/analysis.yaml](examples/analysis.yaml):
+
+```yaml
+language: ja
+diarization_backend: pyannote
+min_speakers: 2
+max_speakers: 4
+audio_normalization: off
+pyannote:
+  clustering:
+    threshold: 0.65
+    Fa: 0.07
+    Fb: 0.8
+  segmentation:
+    min_duration_off: 0.1
+```
+
+Precedence is **explicit CLI options, then YAML settings, then application
+defaults**. Nested settings merge by individual field: overriding the threshold
+retains `Fa`, `Fb`, and the pause duration from YAML. Explicit flags override YAML
+even when they select an application default, such as `--audio-normalization off`
+or `--no-noise-reduction`. Use `--no-resume` to disable YAML-enabled checkpoint
+reuse.
+
+Add `--show-settings` to print the complete merged configuration as YAML to stderr
+after validation and before analysis starts. It is **disabled by default** and is
+a CLI-only option. The output includes all analysis defaults, nested pyannote
+settings, and paths as strings. Configured `auto` and `null` values remain intact;
+a comment explains that null pyannote tuning values use the loaded model's defaults.
+Analysis then continues normally, stdout still contains only the completed report
+path, and the flag does not affect provenance or checkpoint reuse.
+
+```bash
+mise run analyze input.mp4 --config examples/analysis.yaml --pyannote-clustering-threshold 0.6
+mise run analyze input.mp4 --config examples/analysis.yaml --num-speakers 2 --no-resume
+mise run analyze input.mp4 --min-speakers 2 --max-speakers 4 --pyannote-clustering-fa 0.1
+```
+
+Relative paths in YAML, including `model_dir`, `runtime_dir`, and `work_dir`, are
+relative to the **current working directory**. Use `true` and `false` for boolean
+values; unquoted `off` remains a string. Empty files use application defaults.
+Unreadable files, malformed YAML, duplicate or unknown keys, invalid value types,
+and invalid settings are reported before analysis starts.
+
+Speaker counts must be positive integers. When `num_speakers` is supplied it
+takes precedence over both bounds; otherwise `min_speakers` must not exceed
+`max_speakers`. All tuning values must be finite. `Fa` and `Fb` must be positive;
+the threshold and pause duration may be zero. Validation does not restrict
+values to pyannote's suggested optimization search ranges. Count constraints and
+pyannote tuning are rejected when Sortformer diarization is enabled, but can
+remain in a configuration when diarization is disabled.
+
+Tuning values in the example are starting points for experiments, not a preset
+proven to improve accuracy. Omitted or `null` tuning values preserve the loaded
+model's defaults. Overrides are applied in memory without editing downloaded
+models. The configured values appear in JSON `provenance.configuration` and are
+included in checkpoint identity. Changing a setting reruns analysis; equivalent
+YAML and CLI settings reuse the same checkpoints with `--resume`, regardless of
+the configuration filename.
 
 ### Audio preprocessing
 
@@ -292,6 +367,19 @@ result = analyze_video(
 
 # Select pretrained Sortformer v2.1 after preparing its optional runtime and model.
 result = analyze_video(Path("input.mp4"), AnalysisConfig(diarization_backend="sortformer"))
+
+# Set pyannote speaker bounds and override only selected model parameters.
+result = analyze_video(
+    Path("input.mp4"),
+    AnalysisConfig(
+        min_speakers=2,
+        max_speakers=4,
+        pyannote={
+            "clustering": {"threshold": 0.65, "Fa": 0.07, "Fb": 0.8},
+            "segmentation": {"min_duration_off": 0.1},
+        },
+    ),
+)
 ```
 
 The API returns a Pydantic `AnalysisResult` without writing a report. Importing it

@@ -8,6 +8,25 @@ class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class PyannoteClusteringConfig(Record):
+    threshold: float | None = Field(default=None, ge=0, strict=True)
+    Fa: float | None = Field(default=None, gt=0, strict=True)
+    Fb: float | None = Field(default=None, gt=0, strict=True)
+
+
+class PyannoteSegmentationConfig(Record):
+    min_duration_off: float | None = Field(default=None, ge=0, strict=True)
+
+
+class PyannoteConfig(Record):
+    clustering: PyannoteClusteringConfig = Field(default_factory=PyannoteClusteringConfig)
+    segmentation: PyannoteSegmentationConfig = Field(default_factory=PyannoteSegmentationConfig)
+
+    def overrides(self) -> dict[str, dict[str, float]]:
+        """Only explicitly configured values should replace model defaults."""
+        return {key: value for key, value in self.model_dump(exclude_none=True).items() if value}
+
+
 class AnalysisConfig(Record):
     transcription: bool = True
     diarization: bool = True
@@ -21,7 +40,10 @@ class AnalysisConfig(Record):
     resume: bool = False
     language: str | None = None
     report_language: Literal["ja", "en"] = "ja"
-    num_speakers: int | None = Field(default=None, ge=1)
+    num_speakers: int | None = Field(default=None, ge=1, strict=True)
+    min_speakers: int | None = Field(default=None, ge=1, strict=True)
+    max_speakers: int | None = Field(default=None, ge=1, strict=True)
+    pyannote: PyannoteConfig = Field(default_factory=PyannoteConfig)
     audio_stream: int = Field(default=0, ge=0, description="Zero-based audio stream ordinal")
     audio_normalization: Literal["off", "peak", "dynamic"] = "off"
     noise_reduction: bool = False
@@ -37,15 +59,30 @@ class AnalysisConfig(Record):
     worker_timeout: float = Field(default=3600, gt=0)
 
     @model_validator(mode="after")
-    def supported_speaker_count(self):
+    def supported_diarization_settings(self):
+        if (
+            self.num_speakers is None
+            and self.min_speakers is not None
+            and self.max_speakers is not None
+            and self.min_speakers > self.max_speakers
+        ):
+            raise ValueError("min_speakers must be less than or equal to max_speakers")
         if (
             self.diarization
             and self.diarization_backend == "sortformer"
-            and self.num_speakers is not None
+            and (
+                any(
+                    value is not None
+                    for value in (self.num_speakers, self.min_speakers, self.max_speakers)
+                )
+                or self.pyannote.overrides()
+            )
         ):
             raise ValueError(
                 "Sortformer estimates its own speaker count (up to four speakers). "
-                "Omit --num-speakers / num_speakers or select the pyannote backend."
+                "Omit --num-speakers / num_speakers, --min-speakers / min_speakers, "
+                "--max-speakers / max_speakers, and pyannote tuning settings, "
+                "or select the pyannote backend."
             )
         return self
 

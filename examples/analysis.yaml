@@ -1,0 +1,21 @@
+# Run from the repository root:
+# mise run analyze input.mp4 --config examples/analysis.yaml
+# Explicit CLI options override individual settings in this file.
+# Relative model_dir, runtime_dir, and work_dir paths use the working directory.
+
+language: ja
+diarization_backend: pyannote
+min_speakers: 2
+max_speakers: 4
+audio_normalization: off
+
+# Example tuning values, not an accuracy preset. Compare against your own audio.
+# Omit a tuning value (or set it to null) to keep the loaded model's default.
+# num_speakers, when set, takes precedence over min_speakers and max_speakers.
+pyannote:
+  clustering:
+    threshold: 0.65
+    Fa: 0.07
+    Fb: 0.8
+  segmentation:
+    min_duration_off: 0.1

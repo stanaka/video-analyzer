@@ -2,6 +2,7 @@ import math
 import sys
 import time
 import traceback
+from copy import deepcopy
 
 from ..errors import AnalysisError
 
@@ -159,6 +160,16 @@ class AudioBackend:
             self.model = Pipeline.from_pretrained(self.options["model"])
             if self.model is None:
                 raise AnalysisError("Cannot load the local pyannote pipeline")
+            if overrides := self.options.get("pyannote"):
+                parameters = deepcopy(self.model.parameters(instantiated=True))
+                for group, values in overrides.items():
+                    for name, value in values.items():
+                        if name not in parameters.get(group, {}):
+                            raise AnalysisError(
+                                f"The loaded pyannote pipeline does not support {group}.{name}"
+                            )
+                        parameters[group][name] = value
+                self.model.instantiate(parameters)
             self.model.to(torch.device(self.device))
         elif self.kind == "whisper":
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
@@ -197,17 +208,34 @@ class AudioBackend:
         else:
             raise AnalysisError(f"Unknown audio backend: {self.kind}")
 
-    def diarize(self, audio: str, num_speakers: int | None = None, *, progress=None):
+    def diarize(
+        self,
+        audio: str,
+        num_speakers: int | None = None,
+        *,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        progress=None,
+    ):
         import soundfile as sf
         import torch
 
         waveform, sample_rate = sf.read(audio, dtype="float32")
         if progress:
             progress(f"Diarization on {self.device}: {len(waveform) / sample_rate:.1f}s of audio")
+        speaker_options = (
+            {"num_speakers": num_speakers}
+            if num_speakers is not None
+            else {
+                key: value
+                for key, value in (("min_speakers", min_speakers), ("max_speakers", max_speakers))
+                if value is not None
+            }
+        )
         output = self.model(
             {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": sample_rate},
             hook=DiarizationProgress(progress) if progress else None,
-            **({"num_speakers": num_speakers} if num_speakers else {}),
+            **speaker_options,
         )
 
         def turns(annotation):

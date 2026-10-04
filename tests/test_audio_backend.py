@@ -1,5 +1,6 @@
 import sys
 import weakref
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -248,6 +249,104 @@ def test_diarization_reports_real_progress_and_keeps_speaker_options(monkeypatch
         == result["exclusive"]
         == [{"start": 0.2, "end": 1.8, "speaker_id": "speaker"}]
     )
+
+
+@pytest.fixture
+def pyannote_model(monkeypatch):
+    defaults = {
+        "clustering": {"threshold": 0.6, "Fa": 0.07, "Fb": 0.8},
+        "segmentation": {"min_duration_off": 0.0},
+    }
+    model = MagicMock()
+    model.parameters.return_value = defaults
+    factory = MagicMock(return_value=model)
+    monkeypatch.setitem(
+        sys.modules,
+        "pyannote.audio",
+        SimpleNamespace(Pipeline=SimpleNamespace(from_pretrained=factory)),
+    )
+    monkeypatch.setitem(
+        sys.modules, "torch", SimpleNamespace(float32="float32", device=lambda x: x)
+    )
+    monkeypatch.setattr(audio, "select_device", lambda *a, **kw: "cpu")
+    return model, factory, defaults
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"clustering": {"threshold": 0.65}},
+        {"clustering": {"Fa": 0.1, "Fb": 1.2}},
+        {"segmentation": {"min_duration_off": 0.1}},
+        {"clustering": {"threshold": 0.0}, "segmentation": {"min_duration_off": 0.0}},
+    ],
+)
+def test_pyannote_load_overrides_preserve_model_defaults(pyannote_model, overrides):
+    model, factory, defaults = pyannote_model
+    original = deepcopy(defaults)
+    backend = audio.AudioBackend(
+        {"kind": "diarization", "model": "local-model", "pyannote": overrides}
+    )
+    assert backend.model is model
+    factory.assert_called_once_with("local-model")
+    model.to.assert_called_once_with("cpu")
+    if overrides:
+        model.parameters.assert_called_once_with(instantiated=True)
+        expected = deepcopy(original)
+        for group, values in overrides.items():
+            expected[group].update(values)
+        model.instantiate.assert_called_once_with(expected)
+        assert defaults == original
+    else:
+        model.parameters.assert_not_called()
+        model.instantiate.assert_not_called()
+
+
+def test_pyannote_reports_unsupported_model_parameter(pyannote_model):
+    model, _, defaults = pyannote_model
+    del defaults["clustering"]["Fa"]
+    with pytest.raises(AnalysisError, match=r"does not support clustering.Fa"):
+        audio.AudioBackend(
+            {
+                "kind": "diarization",
+                "model": "local-model",
+                "pyannote": {"clustering": {"Fa": 0.1}},
+            }
+        )
+    model.instantiate.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "options,expected",
+    [
+        ({}, {}),
+        ({"min_speakers": 2}, {"min_speakers": 2}),
+        ({"max_speakers": 4}, {"max_speakers": 4}),
+        ({"min_speakers": 2, "max_speakers": 4}, {"min_speakers": 2, "max_speakers": 4}),
+        ({"num_speakers": 2, "min_speakers": 5, "max_speakers": 1}, {"num_speakers": 2}),
+    ],
+)
+def test_pyannote_forwards_speaker_constraints(monkeypatch, options, expected):
+    import numpy as np
+
+    waveform = np.zeros(32000, dtype=np.float32)
+    monkeypatch.setitem(
+        sys.modules, "soundfile", SimpleNamespace(read=lambda *a, **kw: (waveform, 16000))
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(from_numpy=MagicMock()))
+    backend = audio.AudioBackend.__new__(audio.AudioBackend)
+    backend.device = "cpu"
+    backend.model = MagicMock(
+        return_value=SimpleNamespace(
+            speaker_diarization=[(SimpleNamespace(start=0.0, end=2.0), "A")],
+            exclusive_speaker_diarization=[(SimpleNamespace(start=0.0, end=1.5), "A")],
+        )
+    )
+    result = backend.diarize("input.wav", **options)
+    assert backend.model.call_args.kwargs == {"hook": None, **expected}
+    assert result["regular"] == [{"start": 0.0, "end": 2.0, "speaker_id": "A"}]
+    assert result["exclusive"] == [{"start": 0.0, "end": 1.5, "speaker_id": "A"}]
 
 
 def test_diarization_progress_throttles_advancing_batches_without_hiding_completion(monkeypatch):

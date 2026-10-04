@@ -1,4 +1,5 @@
 import itertools
+import json
 from pathlib import Path
 
 import pytest
@@ -392,6 +393,131 @@ def test_diarization_identity_separates_transcription_checkpoints(
     requests = fake_models.requests.copy()
     pipeline.analyze_video(path, config.model_copy(update={"resume": True}))
     assert fake_models.requests == requests
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"num_speakers": 2},
+        {"min_speakers": 2},
+        {"max_speakers": 4},
+        {"pyannote": {"clustering": {"threshold": 0.65}}},
+        {"pyannote": {"clustering": {"Fa": 0.1}}},
+        {"pyannote": {"clustering": {"Fb": 1.2}}},
+        {"pyannote": {"segmentation": {"min_duration_off": 0.1}}},
+    ],
+)
+def test_pyannote_settings_invalidate_checkpoints(updates, simulated_media, fake_models, tmp_path):
+    path, media, _ = simulated_media
+    fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
+    config = AnalysisConfig(profile="cpu", scene_description=False, work_dir=tmp_path / "work")
+    pipeline.analyze_video(path, config)
+    asr_count = fake_models.operations.count("transcribe")
+    updated = AnalysisConfig(**{**config.model_dump(), **updates, "resume": True})
+    result = pipeline.analyze_video(path, updated)
+    assert fake_models.operations.count("diarize") == 2
+    assert fake_models.operations.count("transcribe") == 2 * asr_count
+    for key in updates:
+        assert result.provenance["configuration"][key] == updated.model_dump(mode="json")[key]
+    requests = fake_models.requests.copy()
+    pipeline.analyze_video(path, updated)
+    pipeline.analyze_video(path, config.model_copy(update={"resume": True}))
+    assert fake_models.requests == requests
+
+
+@pytest.mark.parametrize(
+    "backend,options,load_options,speaker_options",
+    [
+        ("pyannote", {}, {}, {}),
+        ("sortformer", {}, {}, {}),
+        (
+            "pyannote",
+            {"min_speakers": 2, "max_speakers": 4},
+            {},
+            {"min_speakers": 2, "max_speakers": 4},
+        ),
+        ("pyannote", {"num_speakers": 2, "min_speakers": 5, "max_speakers": 1}, {}, {}),
+        (
+            "pyannote",
+            {"pyannote": {"clustering": {"Fa": 0.1}}},
+            {"pyannote": {"clustering": {"Fa": 0.1}}},
+            {},
+        ),
+    ],
+)
+def test_diarization_worker_settings(
+    backend, options, load_options, speaker_options, simulated_media, fake_models, tmp_path
+):
+    path, _, _ = simulated_media
+    config = AnalysisConfig(
+        profile="cpu",
+        diarization_backend=backend,
+        transcription=False,
+        scene_description=False,
+        work_dir=tmp_path / "work",
+        **options,
+    )
+    pipeline.analyze_video(path, config)
+    [(load_operation, load), (operation, diarize)] = fake_models.requests
+    assert load_operation == "load" and operation == "diarize"
+    kind = "diarization" if backend == "pyannote" else "sortformer"
+    assert load == {
+        "kind": kind,
+        "model": str(config.model_dir / kind),
+        "device": "cpu",
+        **load_options,
+    }
+    assert {key: value for key, value in diarize.items() if key != "audio"} == {
+        "num_speakers": config.num_speakers,
+        **speaker_options,
+    }
+
+
+def test_equivalent_yaml_and_cli_reuse_checkpoints(simulated_media, fake_models, tmp_path, capsys):
+    path, media, _ = simulated_media
+    fake_models.turns = [{"start": 0, "end": media.duration, "speaker_id": "A"}]
+    work = tmp_path / "work"
+    output = tmp_path / "report.json"
+    settings = (
+        f"profile: cpu\nscene_description: false\nresume: true\nwork_dir: {work}\n"
+        "min_speakers: 2\nmax_speakers: 4\npyannote:\n  clustering: {threshold: 0.65}\n"
+    )
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text(settings)
+    second.write_text(settings)
+    command = ["analyze", str(path), "--format", "json", "-o", str(output)]
+    assert main([*command, "--config", str(first)]) == 0
+    requests = fake_models.requests.copy()
+    assert requests
+    yaml_configuration = json.loads(output.read_text())["provenance"]["configuration"]
+    assert main([*command, "--config", str(second), "--show-settings"]) == 0
+    assert (
+        main(
+            [
+                *command,
+                "--profile",
+                "cpu",
+                "--no-scene-description",
+                "--resume",
+                "--work-dir",
+                str(work),
+                "--min-speakers",
+                "2",
+                "--max-speakers",
+                "4",
+                "--pyannote-clustering-threshold",
+                "0.65",
+            ]
+        )
+        == 0
+    )
+    assert fake_models.requests == requests
+    assert json.loads(output.read_text())["provenance"]["configuration"] == yaml_configuration
+    assert "show_settings" not in yaml_configuration
+    terminal = capsys.readouterr()
+    assert terminal.out == f"{output.resolve()}\n" * 3
+    assert terminal.err.count("# Analysis settings\n") == 1
 
 
 @pytest.mark.parametrize("enabled", COMBINATIONS)

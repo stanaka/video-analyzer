@@ -131,16 +131,31 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
                     with Worker(
                         config.runtime_dir, diarization_runtime, config.worker_timeout
                     ) as worker:
+                        load_options, speaker_options = {}, {}
+                        if config.diarization_backend == "pyannote":
+                            if overrides := config.pyannote.overrides():
+                                load_options["pyannote"] = overrides
+                            if config.num_speakers is None:
+                                speaker_options = {
+                                    key: value
+                                    for key, value in (
+                                        ("min_speakers", config.min_speakers),
+                                        ("max_speakers", config.max_speakers),
+                                    )
+                                    if value is not None
+                                }
                         runtime = worker.request(
                             "load",
                             kind=diarization_kind,
                             model=models[diarization_kind]["directory"],
                             device=device(config.diarization_device),
+                            **load_options,
                         )
                         diarization = worker.request(
                             "diarize",
                             audio=str(audio_path.resolve()),
                             num_speakers=config.num_speakers,
+                            **speaker_options,
                         )
                         diarization["runtime"] = runtime
                     cache.put("diarization", diarization)
