@@ -3,7 +3,7 @@
 __version__ = "0.1.0"
 
 from .report import render_json, render_markdown
-from .schema import AnalysisConfig, AnalysisResult
+from .schema import AnalysisConfig, AnalysisResult, LLMConfig
 
 
 def analyze_video(path, config=None):
@@ -20,10 +20,19 @@ def write_html(result, output, *, video_path=None):
     return write(result, output, video_path=video_path)
 
 
+def polish_analysis(result, llm_config, *, work_dir=None, resume=False):
+    """Polish saved analysis text through a configured OpenAI-compatible endpoint."""
+    from .llm import polish_analysis as polish
+
+    return polish(result, llm_config, work_dir=work_dir, resume=resume)
+
+
 __all__ = [
     "AnalysisConfig",
     "AnalysisResult",
+    "LLMConfig",
     "analyze_video",
+    "polish_analysis",
     "render_json",
     "render_markdown",
     "write_html",

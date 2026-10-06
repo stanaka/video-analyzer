@@ -1,0 +1,12 @@
+# Set base_url and model to match your OpenAI-compatible server.
+# mise run analyze input.mp4 --config examples/analysis_llm.yaml --resume
+# mise run polish input.analysis.raw.json --config examples/analysis_llm.yaml --resume
+llm_enabled: true
+llm:
+  base_url: http://localhost:8000/v1
+  model: your-model
+  api_key_env: VIDEO_ANALYZER_LLM_API_KEY
+  timeout: 120
+  max_input_chars: 24000
+  transcript_overlap_units: 10
+  scene_overlap_observations: 1

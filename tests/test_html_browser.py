@@ -48,6 +48,25 @@ def load(page, result, tmp_path):
     return output
 
 
+def test_merged_scene_description_and_polished_text_render_safely(page, viewer_result, tmp_path):
+    summary = '<img src=x onerror="window.injected=true"> Merged description'
+    viewer_result.scenes[0].description = summary
+    viewer_result.transcript[0].text = "Polished passage "
+    viewer_result.provenance["llm"] = {
+        "model": "test-model",
+        "base_url": "http://localhost:8000/v1",
+    }
+    load(page, viewer_result, tmp_path)
+    assert page.locator(".scene-entry p").count() == 1
+    assert page.locator(".scene-entry p").inner_text() == summary
+    assert "Test pattern." not in page.locator(".scene-entry").inner_text()
+    assert page.locator(".scene-entry img").count() == 0
+    assert page.evaluate("window.injected") is None
+    assert "Polished passage" in page.locator("#transcript").inner_text()
+    assert "test-model" in page.locator("#metadata").text_content()
+    assert "http://localhost:8000/v1" in page.locator("#metadata").text_content()
+
+
 def slider(page, selector, value):
     page.locator(selector).evaluate(
         "(el, value) => { el.value = value; el.dispatchEvent(new Event('input', {bubbles: true})); }",

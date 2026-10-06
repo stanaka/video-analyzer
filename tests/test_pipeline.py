@@ -7,10 +7,99 @@ import pytest
 from pydantic import ValidationError
 
 import video_analyzer.pipeline as pipeline
+from video_analyzer import LLMConfig, llm
 from video_analyzer.cli import main, parser
 from video_analyzer.errors import AnalysisError
 from video_analyzer.report import render_json, render_markdown
 from video_analyzer.schema import AnalysisConfig, AnalysisResult, MediaInfo, Scene
+
+
+def test_llm_api_and_local_cache_independent_of_polishing_settings(
+    simulated_media, fake_models, tmp_path, monkeypatch
+):
+    path, _, calls = simulated_media
+    fake_models.turns = [{"start": 0, "end": 60, "speaker_id": "A"}]
+    config = AnalysisConfig(profile="cpu", work_dir=tmp_path / "work", resume=True)
+    raw = pipeline.analyze_video(path, config)
+    previous = fake_models.requests.copy()
+    extraction = calls.copy()
+    llm_calls = []
+
+    def complete(self, request_messages):
+        llm_calls.append(request_messages)
+        payload = json.loads(request_messages[1]["content"])
+        if "core" in payload:
+            return {
+                "corrections": [
+                    {"id": unit["id"], "text": unit["text"] + "!", "speaker_id": unit["speaker_id"]}
+                    for unit in payload["core"]
+                ]
+            }
+        return {"description": "Merged visual description"}
+
+    monkeypatch.setattr(llm.LLMClient, "complete", complete)
+    polished_config = config.model_copy(
+        update={
+            "llm_enabled": True,
+            "llm": LLMConfig(base_url="http://localhost:8000/v1", model="test-model"),
+        }
+    )
+    result = pipeline.analyze_video(path, polished_config)
+    assert result.transcript[0].text == raw.transcript[0].text + "!"
+    assert all(scene.description == "Merged visual description" for scene in result.scenes)
+    assert fake_models.requests == previous and calls == extraction
+    count = len(llm_calls)
+    pipeline.analyze_video(path, polished_config)
+    assert len(llm_calls) == count
+    for change in (
+        {"model": "another-model"},
+        {"max_input_chars": 12000},
+        {"transcript_overlap_units": 0},
+    ):
+        updated = polished_config.model_copy(
+            update={"llm": polished_config.llm.model_copy(update=change)}
+        )
+        pipeline.analyze_video(path, updated)
+        assert len(llm_calls) > count
+        count = len(llm_calls)
+        assert fake_models.requests == previous and calls == extraction
+
+
+def test_llm_api_failure_resumes_without_local_workers(
+    simulated_media, fake_models, tmp_path, monkeypatch
+):
+    path, _, _ = simulated_media
+    config = AnalysisConfig(
+        profile="cpu",
+        work_dir=tmp_path / "work",
+        resume=True,
+        llm_enabled=True,
+        llm={"base_url": "http://localhost:8000/v1", "model": "test-model"},
+    )
+    accepted = []
+
+    def complete(self, request_messages):
+        if accepted:
+            raise AnalysisError("endpoint offline")
+        accepted.append(request_messages)
+        return {"description": "Merged description"}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(llm.LLMClient, "complete", complete)
+        with pytest.raises(AnalysisError, match="endpoint offline"):
+            pipeline.analyze_video(path, config)
+    local_requests = fake_models.requests.copy()
+    resumed = []
+
+    def recover(self, request_messages):
+        resumed.append(request_messages)
+        return {"description": "Merged description"}
+
+    monkeypatch.setattr(llm.LLMClient, "complete", recover)
+    result = pipeline.analyze_video(path, config)
+    assert len(resumed) == 1
+    assert all(scene.description == "Merged description" for scene in result.scenes)
+    assert fake_models.requests == local_requests
 
 
 @pytest.fixture

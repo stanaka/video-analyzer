@@ -1,19 +1,20 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import yaml
 from pydantic import ValidationError
 
-from . import __version__, analyze_video, write_html
+from . import __version__, analyze_video, polish_analysis, write_html
 from .config import load_settings, merge_settings
 from .diarization import NEMO_DIARIZERS, selected_diarizers
 from .errors import AnalysisError
 from .media import prerequisites
 from .models import local_models, prepare_models, required_models, resolve_profile
 from .report import render_json, render_markdown
-from .schema import AnalysisConfig, AnalysisResult
+from .schema import AnalysisConfig, AnalysisResult, LLMConfig
 from .storage import atomic_text, read_json
 from .worker_client import Worker
 
@@ -23,12 +24,56 @@ PYANNOTE_PARAMETERS = {
     "pyannote_clustering_fb": ("clustering", "Fb"),
     "pyannote_segmentation_min_duration_off": ("segmentation", "min_duration_off"),
 }
+LLM_PARAMETERS = {f"llm_{name}": name for name in LLMConfig.model_fields}
+
+
+def add_llm_arguments(command):
+    defaults = LLMConfig()
+    help_text = {
+        "base_url": "HTTP(S) API root, for example http://localhost:8000/v1 (required for polishing)",
+        "model": "Endpoint model name (required for polishing)",
+        "api_key_env": "Environment variable containing the optional API key (default: %(default)s)",
+        "timeout": "Positive seconds per endpoint attempt (default: %(default)s)",
+        "max_input_chars": "Positive serialized message character budget including prompts and context (default: %(default)s)",
+        "transcript_overlap_units": "Read-only neighboring transcript units on each side (default: %(default)s)",
+        "scene_overlap_observations": "Read-only preceding observations for scene continuation (default: %(default)s)",
+    }
+    for name in LLMConfig.model_fields:
+        kind = (
+            float
+            if name == "timeout"
+            else int
+            if name in ("max_input_chars", "transcript_overlap_units", "scene_overlap_observations")
+            else str
+        )
+        command.add_argument(
+            f"--llm-{name.replace('_', '-')}",
+            type=kind,
+            default=getattr(defaults, name),
+            help=help_text[name],
+        )
+
+
+def show_settings(config):
+    print(
+        "# Analysis settings\n"
+        "# Null pyannote tuning values use the loaded model's defaults.\n"
+        + yaml.safe_dump(
+            config.model_dump(mode="json"),
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        ),
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def parser(*, sparse=False):
     cli = argparse.ArgumentParser(
         prog="video-analyzer",
-        description="Analyze local MP4 videos entirely offline after model preparation.",
+        description="Analyze local MP4 videos offline, with optional endpoint-based LLM polishing.",
         epilog="Run video-analyzer COMMAND --help for command options and examples.",
     )
     cli.add_argument(
@@ -109,7 +154,8 @@ def parser(*, sparse=False):
         "analyze",
         help="Analyze one local MP4",
         description="Transcribe speech, identify speakers, detect scenes, and describe one local MP4\n"
-        "using prepared models offline. Always save JSON, plus the selected report format.\n"
+        "using prepared models offline; --llm adds endpoint-based text polishing.\n"
+        "Always save JSON, plus the selected report format.\n"
         "Progress goes to stderr; stdout prints the selected report path.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
@@ -124,6 +170,14 @@ def parser(*, sparse=False):
         "  video-analyzer analyze input.mp4 --no-transcription --no-diarization",
     )
     analyze.add_argument("input", type=Path, help="Path to the local MP4 video")
+    analyze.add_argument(
+        "--llm",
+        dest="llm_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Polish text and merge scene descriptions through the configured endpoint; save raw JSON first (default: disabled)",
+    )
+    add_llm_arguments(analyze)
     analyze.add_argument(
         "--start-time",
         default=0,
@@ -345,14 +399,45 @@ def parser(*, sparse=False):
         type=Path,
         help="Markdown path; defaults to the JSON path with .md extension",
     )
+    polish = commands.add_parser(
+        "polish",
+        help="Polish a saved JSON analysis through an LLM endpoint",
+        description="Correct transcript text/speaker assignments and merge scene descriptions. "
+        "No original video, FFmpeg, or model runtimes are required. Input JSON is preserved.",
+    )
+    polish.add_argument("input", type=Path, help="Saved raw JSON analysis result")
+    polish.add_argument(
+        "-o", "--output", type=Path, help="Output JSON; defaults to INPUT.polished.json"
+    )
+    polish.add_argument(
+        "--config", type=Path, help="YAML settings; explicit CLI options override individual leaves"
+    )
+    polish.add_argument(
+        "--show-settings", action="store_true", help="Print merged settings to stderr"
+    )
+    polish.add_argument(
+        "--work-dir", type=Path, help="Checkpoint root (default: .video-analyzer beside input JSON)"
+    )
+    polish.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Reuse validated LLM checkpoints",
+    )
+    add_llm_arguments(polish)
     if sparse:
         # Only supplied analysis flags should override YAML. Keep the public
         # parser's defaults and help unchanged for ordinary callers.
-        for action in analyze._actions:
-            if action.dest in AnalysisConfig.model_fields or action.dest in PYANNOTE_PARAMETERS:
-                if action.help:
-                    action.help = action.help.replace("%(default)s", str(action.default))
-                action.default = argparse.SUPPRESS
+        for command in (analyze, polish):
+            for action in command._actions:
+                if (
+                    action.dest in AnalysisConfig.model_fields
+                    or action.dest in PYANNOTE_PARAMETERS
+                    or action.dest in LLM_PARAMETERS
+                ):
+                    if action.help:
+                        action.help = action.help.replace("%(default)s", str(action.default))
+                    action.default = argparse.SUPPRESS
     return cli
 
 
@@ -447,6 +532,11 @@ def main(argv=None) -> int:
                 options.setdefault("pyannote", {}).setdefault(group, {})[parameter] = getattr(
                     explicit, name
                 )
+        for name, field in LLM_PARAMETERS.items():
+            if hasattr(explicit, name):
+                options.setdefault("llm", {})[field] = getattr(explicit, name)
+        if args.command == "polish":
+            options["llm_enabled"] = True
         settings = load_settings(args.config) if args.config is not None else {}
         try:
             config = AnalysisConfig.model_validate(merge_settings(settings, options))
@@ -454,6 +544,29 @@ def main(argv=None) -> int:
             if args.config is not None:
                 raise AnalysisError(f"Invalid configuration {args.config}: {exc}") from exc
             raise
+        if args.command == "polish":
+            output = args.output or args.input.with_suffix(".polished.json")
+            result = AnalysisResult.model_validate(read_json(args.input))
+            protected = {
+                args.input.resolve(),
+                Path(result.media.path).resolve(),
+                args.input.with_suffix(".raw.json").resolve(),
+            }
+            if output.resolve() in protected:
+                raise AnalysisError(
+                    "Output must not overwrite input JSON, input video, or companion raw JSON"
+                )
+            if args.show_settings:
+                show_settings(config)
+            result = polish_analysis(
+                result,
+                config.llm,
+                work_dir=config.work_dir or args.input.parent / ".video-analyzer",
+                resume=config.resume,
+            )
+            atomic_text(output, render_json(result))
+            print(str(output.resolve()))
+            return 0
         suffix = {"json": ".analysis.json", "markdown": ".analysis.md", "html": ".analysis.html"}[
             args.format
         ]
@@ -468,21 +581,29 @@ def main(argv=None) -> int:
                 "The selected report and JSON result need different paths. "
                 "Use --format json for JSON output, or choose a non-.json report path."
             )
-        if args.show_settings:
-            print(
-                "# Analysis settings\n"
-                "# Null pyannote tuning values use the loaded model's defaults.\n"
-                + yaml.safe_dump(
-                    config.model_dump(mode="json"),
-                    allow_unicode=True,
-                    sort_keys=False,
-                    default_flow_style=False,
-                ),
-                end="",
-                file=sys.stderr,
-                flush=True,
+        raw_output = json_output.with_suffix(".raw.json")
+        if config.llm_enabled and raw_output.resolve() in {
+            args.input.resolve(),
+            output.resolve(),
+            json_output.resolve(),
+        }:
+            raise AnalysisError(
+                "Raw JSON needs a distinct path from the input video and selected outputs"
             )
-        result = analyze_video(args.input, config)
+        if args.show_settings:
+            show_settings(config)
+        started = time.monotonic()
+        result = analyze_video(
+            args.input,
+            config.model_copy(update={"llm_enabled": False}) if config.llm_enabled else config,
+        )
+        if config.llm_enabled:
+            atomic_text(raw_output, render_json(result))
+            print(f"Raw JSON result saved to {raw_output.resolve()}", file=sys.stderr, flush=True)
+            result = polish_analysis(
+                result, config.llm, work_dir=config.work_dir, resume=config.resume
+            )
+            result.provenance["elapsed_seconds"] = time.monotonic() - started
         # Save the completed analysis before presentation work, so export failures
         # can be retried without rerunning inference.
         atomic_text(json_output, render_json(result))

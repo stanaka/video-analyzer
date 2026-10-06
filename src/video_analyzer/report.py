@@ -83,6 +83,8 @@ def render_markdown(result: AnalysisResult) -> str:
         )
     for stage, runtime in result.provenance.get("runtimes", {}).items():
         lines.append(f"- {escape(stage)}: {escape(runtime.get('device', 'unknown'))}")
+    if llm := result.provenance.get("llm"):
+        lines.append(f"- LLM: {escape(llm['model'])}; {escape(llm['base_url'])}")
     lines += [
         "",
         "モデルによる文字起こし・話者区分・映像説明には誤りが含まれる場合があります。"
@@ -102,10 +104,13 @@ def render_markdown(result: AnalysisResult) -> str:
         ]
         if scene_description:
             lines += ["### 映像の説明" if ja else "### Visual description", ""]
-            for observation in scene.observations:
-                lines.append(
-                    f"- **{timestamp(observation.start)} – {timestamp(observation.end)}**: {escape(observation.description)}"
-                )
+            if scene.description is not None:
+                lines.append(escape(scene.description))
+            else:
+                for observation in scene.observations:
+                    lines.append(
+                        f"- **{timestamp(observation.start)} – {timestamp(observation.end)}**: {escape(observation.description)}"
+                    )
             lines.append("")
         if not transcription:
             continue

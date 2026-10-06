@@ -2,7 +2,8 @@
 
 A Python CLI and API for MP4 transcription, speaker diarization, scene detection,
 and visual descriptions. After explicit model preparation, analysis runs locally
-without downloads or hosted inference services.
+without downloads or hosted inference services. Optional LLM polishing can use
+a configurable local or hosted OpenAI-compatible endpoint.
 
 - **Speech:** Whisper large-v3 (default), or Qwen3-ASR-1.7B with Qwen3-ForcedAligner-0.6B.
 - **Speakers:** pyannote `speaker-diarization-community-1` (default), NVIDIA Sortformer v2.1, or NVIDIA Nemotron 3 Diarization, retaining overlapping and exclusive turns.
@@ -436,6 +437,73 @@ the report explains whether the input has no audio track or both transcription
 and diarization are disabled. Changing either uses a separate checkpoint directory;
 `--resume` reuses work only for matching settings.
 
+### Optional LLM polishing
+
+Enable text polishing after local inference, or polish a saved analysis without
+the original video, FFmpeg, or model runtimes:
+
+```bash
+mise run analyze input.mp4 --config examples/analysis_llm.yaml --resume
+mise run polish input.analysis.raw.json --config examples/analysis_llm.yaml --resume -o input.analysis.polished.json
+# Without a YAML file:
+video-analyzer polish input.analysis.json \
+  --llm-base-url http://localhost:8000/v1 --llm-model your-model \
+  --llm-max-input-chars 24000 --llm-transcript-overlap-units 10 \
+  --llm-scene-overlap-observations 1 --resume
+video-analyzer export-markdown input.analysis.polished.json
+```
+
+Edit the example's endpoint and model for your server. `llm_enabled: true` or
+`--llm` activates the stage during analysis; endpoint settings alone do not.
+`--no-llm` overrides YAML activation. The `polish` command always activates it.
+Explicit CLI flags override individual YAML leaves. Relative paths use the
+working directory. `--show-settings` prints the merged settings before processing.
+
+Set the optional API key in `VIDEO_ANALYZER_LLM_API_KEY`, or name a different
+variable with `llm.api_key_env` / `--llm-api-key-env`. Unset keys permit
+unauthenticated local endpoints. Keys are never serialized into outputs or
+checkpoints. Configure an HTTP(S) API root such as `http://localhost:8000/v1`;
+the client appends `/chat/completions`. The endpoint must accept non-streaming
+chat messages and return a JSON object in the completion text. No SDK or
+provider-specific JSON-schema support is required. `llm.timeout` /
+`--llm-timeout` sets seconds per attempt (default 120).
+
+`llm.max_input_chars` / `--llm-max-input-chars` limits the serialized message
+length, including prompts and context (default 24,000 characters, not tokens).
+`llm.transcript_overlap_units` / `--llm-transcript-overlap-units` sets neighboring
+timed units on **each side** of a correction core (default 10). Units are
+typically words, not sentences. Cores own each unit exactly once. Preceding
+overlap contains accepted polished text; upcoming overlap retains original text.
+Overlap is read-only, so it cannot produce conflicting corrections or duplicates.
+Zero overlap disables neighboring context. If even one core unit and its
+available configured context cannot fit, increase the budget or reduce overlap;
+text is never silently truncated.
+
+Scene descriptions use bounded continuations with a rolling summary and
+`llm.scene_overlap_observations` / `--llm-scene-overlap-observations` preceding
+observations (default 1). Each new observation is incorporated once. The final
+`scenes[].description` is shown in Markdown and HTML; original timed observations
+remain in JSON. Scenes without observations remain without a merged description.
+
+Polishing conservatively corrects transcript text in its original language and
+may reassign transcript speakers among existing IDs. Unit IDs, timestamps,
+scene links, language fields, measured diarization turns, and speaker inventory
+remain intact. Speaker corrections use text context rather than new acoustic
+inference; diarization-disabled transcripts retain unset speakers. Visual
+summaries use only observations and the existing report language.
+
+`analyze --llm` first saves `<json-stem>.raw.json`, then publishes polished JSON
+at the normal output path. The API still writes no reports. `polish` preserves
+its input and defaults to `<input-stem>.polished.json`; use `-o` to change it.
+Existing outputs are preserved if polishing fails. Local model checkpoints are
+independent of LLM settings. `--resume` replays accepted LLM batches in order,
+restoring overlap and scene-summary context before continuing. Changing the
+endpoint, model, input, batch budget, or overlap repeats polishing while retaining
+matching local inference work. Changing the timeout or API-key variable can reuse
+accepted responses. Connection failures, timeouts, HTTP 429, and HTTP 5xx get up
+to two retries; authentication errors and invalid corrections fail immediately.
+LLM settings, source hash, and request metrics are recorded in provenance.
+
 ### Export a Markdown report
 
 Convert a saved JSON analysis into the full Markdown report without rerunning
@@ -543,6 +611,25 @@ result = analyze_video(
 # Select pretrained Sortformer v2.1 after preparing its optional runtime and model.
 result = analyze_video(Path("input.mp4"), AnalysisConfig(diarization_backend="sortformer"))
 
+# Optional text-only polishing; save raw first when retaining the original.
+from video_analyzer import LLMConfig, polish_analysis
+
+raw = analyze_video(Path("input.mp4"), AnalysisConfig(resume=True))
+Path("raw.json").write_text(render_json(raw), encoding="utf-8")
+polished = polish_analysis(
+    raw,
+    LLMConfig(
+        base_url="http://localhost:8000/v1", model="your-model",
+        max_input_chars=24000, transcript_overlap_units=10, scene_overlap_observations=1,
+    ),
+    resume=True,
+)
+# Or return a polished result directly from analysis:
+polished = analyze_video(
+    Path("input.mp4"),
+    AnalysisConfig(llm_enabled=True, llm={"base_url": "http://localhost:8000/v1", "model": "your-model"}),
+)
+
 # Set pyannote speaker bounds and override only selected model parameters.
 result = analyze_video(
     Path("input.mp4"),
@@ -568,7 +655,8 @@ and the JSON schema unchanged.
 
 JSON schema `1.0` includes media metadata, model/runtime provenance, anonymous
 speakers, regular/exclusive turns, timed transcript units, scenes, observations,
-and warnings. Times are seconds relative to video start. Scenes reference
+and warnings. Optional `scenes[].description` stores a merged LLM description;
+older JSON without it remains readable. Times are seconds relative to video start. Scenes reference
 canonical transcript IDs; a unit crossing a cut is represented once. Overlapping
 diarization is retained even though text receives one speaker assignment.
 `provenance.analysis_range` records the effective `{start, end}` bounds in seconds;
@@ -638,10 +726,14 @@ and original Molmo2 weights may produce different descriptions.
 
 ## Offline behavior
 
-Only `prepare-models` contacts Hugging Face. Analysis checks local assets before
+Only `prepare-models` contacts Hugging Face. Default analysis checks local assets before
 inference, enables library offline flags, disables telemetry, and blocks Python
 network sockets in workers. Tokens are not passed to workers or written into
 reports/manifests. Molmo2 custom code is loaded from its prepared snapshot.
+Explicitly enabled LLM polishing contacts the configured endpoint from the parent
+process and sends transcript text, speaker turns, and visual descriptions, without
+audio, video, or frames. Model workers retain their network guards. A local endpoint
+can keep inference on your machine; a hosted endpoint receives this text content.
 
 Socket guards are defense in depth, not an OS sandbox for native code. Independent
 offline verification should also disable networking or use an OS network sandbox.

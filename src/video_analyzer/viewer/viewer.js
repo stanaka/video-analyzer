@@ -553,7 +553,8 @@
     button.addEventListener("click", () => seekTo(scene.start, true));
     row.append(button);
     if (settings.scene_description !== false) {
-      scene.observations.forEach(observation => {
+      if (scene.description != null) row.append(element("p", "", scene.description));
+      else scene.observations.forEach(observation => {
         const item = element("p");
         const jump = element("button", "", time(observation.start));
         jump.type = "button";
