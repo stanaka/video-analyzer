@@ -69,6 +69,11 @@ description = "Export a Markdown report from a saved JSON analysis without model
 raw_args = true
 run = ".venv/bin/video-analyzer export-markdown"
 
+[tasks.polish]
+description = "Polish a saved JSON analysis through a configured LLM endpoint"
+raw_args = true
+run = ".venv/bin/video-analyzer polish"
+
 [tasks."setup:browser-tests"]
 description = "Explicitly download Chromium for HTML viewer tests"
 run = "PLAYWRIGHT_BROWSERS_PATH=.cache/playwright .venv/bin/python -m playwright install chromium"

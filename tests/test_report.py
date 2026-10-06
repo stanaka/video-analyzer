@@ -3,7 +3,7 @@ import itertools
 import pytest
 
 from video_analyzer.report import render_json, render_markdown
-from video_analyzer.schema import AnalysisResult, MediaInfo, Scene
+from video_analyzer.schema import AnalysisResult, MediaInfo, Observation, Scene
 
 AUDIO_PROCESSING = list(itertools.product(("off", "peak", "dynamic"), (False, True)))
 NORMALIZATION_STATUS = {
@@ -11,6 +11,26 @@ NORMALIZATION_STATUS = {
     "ja": {"off": "無効", "peak": "有効 (peak)", "dynamic": "有効 (dynamic)"},
 }
 NOISE_STATUS = {"en": {False: "Disabled", True: "Enabled"}, "ja": {False: "無効", True: "有効"}}
+
+
+def test_markdown_prefers_safe_merged_description_and_keeps_json_observations(report_result):
+    scene = report_result.scenes[0]
+    scene.observations = [
+        Observation(start=0, end=10, description="Original observation", frame_timestamps=[1])
+    ]
+    scene.description = "Merged <script>alert(1)</script> description."
+    report_result.provenance["llm"] = {
+        "model": "configured-model",
+        "base_url": "http://localhost:8000/v1",
+    }
+    markdown = render_markdown(report_result)
+    assert "Original observation" not in markdown
+    assert "Merged &lt;script&gt;" in markdown
+    assert "configured\\-model" in markdown
+    assert "http://localhost:8000/v1" in markdown
+    assert "Original observation" in render_json(report_result)
+    scene.description = None
+    assert "Original observation" in render_markdown(report_result)
 
 
 @pytest.fixture

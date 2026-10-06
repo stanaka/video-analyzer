@@ -22,6 +22,14 @@ def progress(message: str):
 
 
 def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
+    if config.llm_enabled:
+        from .llm import polish_analysis
+
+        started = time.monotonic()
+        raw = analyze_video(path, config.model_copy(update={"llm_enabled": False}))
+        result = polish_analysis(raw, config.llm, work_dir=config.work_dir, resume=config.resume)
+        result.provenance["elapsed_seconds"] = time.monotonic() - started
+        return result
     started = time.monotonic()
     path = Path(path).expanduser().resolve()
     profile = resolve_profile(config.profile)
@@ -77,7 +85,16 @@ def analyze_video(path: str | Path, config: AnalysisConfig) -> AnalysisResult:
     # Paths and output-only settings do not affect analysis, but report language does
     # affect the vision prompt and therefore must be part of the cache identity.
     settings = config.model_dump(
-        mode="json", exclude={"resume", "work_dir", "model_dir", "runtime_dir", "worker_timeout"}
+        mode="json",
+        exclude={
+            "resume",
+            "work_dir",
+            "model_dir",
+            "runtime_dir",
+            "worker_timeout",
+            "llm_enabled",
+            "llm",
+        },
     )
     manifest_hash = hashlib.sha256(
         json.dumps({key: entry["files"] for key, entry in models.items()}, sort_keys=True).encode()

@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,12 +31,61 @@ class PyannoteConfig(Record):
         return {key: value for key, value in self.model_dump(exclude_none=True).items() if value}
 
 
+class LLMConfig(Record):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    base_url: str | None = None
+    model: str | None = Field(default=None, min_length=1)
+    api_key_env: str = Field(default="VIDEO_ANALYZER_LLM_API_KEY", min_length=1)
+    timeout: float = Field(default=120, gt=0)
+    max_input_chars: int = Field(default=24000, gt=0, strict=True)
+    transcript_overlap_units: int = Field(default=10, ge=0, strict=True)
+    scene_overlap_observations: int = Field(default=1, ge=0, strict=True)
+
+    @field_validator("base_url")
+    @classmethod
+    def api_root(cls, value):
+        if value is None:
+            return value
+        try:
+            parts = urlsplit(value)
+            valid = (
+                parts.scheme in ("http", "https")
+                and parts.hostname
+                and not parts.username
+                and not parts.password
+                and not parts.query
+                and not parts.fragment
+            )
+            _ = parts.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(
+                "LLM base_url must be an HTTP(S) API root without credentials, query, or fragment"
+            )
+        return value.rstrip("/")
+
+    @field_validator("model", "api_key_env")
+    @classmethod
+    def nonblank(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    def require_endpoint(self):
+        if not self.base_url or not self.model:
+            raise ValueError("LLM polishing requires explicit llm.base_url and llm.model")
+
+
 class AnalysisConfig(Record):
     start_time: float = Field(default=0.0, ge=0)
     end_time: float | None = Field(default=None, gt=0)
     transcription: bool = True
     diarization: bool = True
     scene_description: bool = True
+    llm_enabled: bool = False
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     asr: Literal["whisper", "qwen"] = "whisper"
     diarization_backend: Literal["pyannote", "sortformer", "nemotron"] = "pyannote"
     profile: Literal["auto", "mac", "cuda", "cpu"] = "auto"
@@ -83,6 +133,8 @@ class AnalysisConfig(Record):
 
     @model_validator(mode="after")
     def ordered_analysis_range(self):
+        if self.llm_enabled:
+            self.llm.require_endpoint()
         if self.end_time is not None and self.end_time <= self.start_time:
             raise ValueError("end_time must be greater than start_time")
         return self
@@ -167,6 +219,7 @@ class Observation(Span):
 
 class Scene(Span):
     id: str
+    description: str | None = None
     observations: list[Observation] = Field(default_factory=list)
     transcript_ids: list[str] = Field(default_factory=list)
 
